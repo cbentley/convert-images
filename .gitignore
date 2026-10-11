@@ -8,3 +8,6 @@ venv/
 
 # Python bytecode
 __pycache__/
+
+# Local scratch data
+tmp/
