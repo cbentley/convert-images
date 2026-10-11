@@ -16,6 +16,7 @@ import datetime
 import logging
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pikepdf
@@ -34,20 +35,23 @@ GENERIC_FOLDER_NAMES = {"master"}
 
 # --- ImageMagick (image -> single-page PDF; the only lossy step) ---
 IMAGEMAGICK_CMD = "convert" # Set to "magick" for ImageMagick versions > 6
-# Placed before the input file (read settings; -density must go here)
-IMAGEMAGICK_INPUT_OPTS = ["-density", "300"]
+# Placed before the input file (read settings; -density must go here).
+# "-limit thread 1" keeps each process single-threaded, since CONVERT_JOBS already runs one per core.
+IMAGEMAGICK_INPUT_OPTS = ["-limit", "thread", "1", "-density", "300"]
 # Placed after the input file (processing and output encoding)
 IMAGEMAGICK_OUTPUT_OPTS = [
     "-resize", "3500x3500>",
     "-quality", "75",
     "-compress", "jpeg",
 ]
+# Number of images converted in parallel. Lower it if large TIFFs exhaust memory.
+CONVERT_JOBS = os.cpu_count() or 1
 
 # --- OCRmyPDF (language is set by --ocr-lang) ---
 OCR_CMD = "ocrmypdf"
 # --optimize 2/3, PDF/A output and --deskew re-encode page images; --rotate-pages is lossless.
 OCR_OPTS = [
-    "--optimize", "1", # Use 1 for photos, 3 for text
+    "--optimize", "3", # Select 3 for general use. Select 1 for higher quality (and larger file sizes).
     #"--deskew", # Also re-encodes the JPEG
     #"--rotate-pages", # Use for text
     "--output-type", "pdf",
@@ -155,11 +159,23 @@ def convert_all_images(folder: Path, single_pages_dir: Path) -> list[Path]:
 
     logger.info(f"  Found {len(images)} images")
 
-    pdf_pages = []
-    for idx, img in enumerate(images):
-        pdf_path = single_pages_dir / f"{folder.name}_page{idx:06d}.pdf"
-        convert_image_to_pdf(img, pdf_path)
-        pdf_pages.append(pdf_path)
+    pdf_pages = [
+        single_pages_dir / f"{folder.name}_page{idx:06d}.pdf"
+        for idx in range(len(images))
+    ]
+
+    with ThreadPoolExecutor(max_workers=CONVERT_JOBS) as executor:
+        futures = [
+            executor.submit(convert_image_to_pdf, img, pdf_path)
+            for img, pdf_path in zip(images, pdf_pages)
+        ]
+        try:
+            for future in futures:
+                future.result()
+        except BaseException:
+            # Don't start queued conversions after a failure or Ctrl-C
+            executor.shutdown(cancel_futures=True)
+            raise
 
     logger.info(f"  Converted {len(pdf_pages)} images to PDFs")
     return pdf_pages

@@ -24,7 +24,7 @@ There is no test suite, linter config, or build step. To verify changes, run the
 
 Per-folder stages, each writing to a numbered subdir of `<folder>/_work/`:
 
-1. `01_single_pages` — `convert_image_to_pdf` shells out to ImageMagick with `IMAGEMAGICK_INPUT_OPTS` before the input file and `IMAGEMAGICK_OUTPUT_OPTS` after it (currently 300 dpi, resize to ≤3500px, JPEG q75; ImageMagick's default 4:2:0 chroma below q90). This is the pipeline's only lossy encode.
+1. `01_single_pages` — `convert_image_to_pdf` shells out to ImageMagick with `IMAGEMAGICK_INPUT_OPTS` before the input file and `IMAGEMAGICK_OUTPUT_OPTS` after it (currently 300 dpi, resize to ≤3500px, JPEG q75; ImageMagick's default 4:2:0 chroma below q90). This is the pipeline's only lossy encode. Images are converted in parallel (`CONVERT_JOBS` threads, each running a `convert` limited to one thread via `-limit thread 1`); a failure cancels queued conversions.
 2. `02_pre_ocr` — `merge_pages_into_chunks` merges pages into chunks capped at `PRE_OCR_MAX_MB` (50, hardcoded) to keep OCRmyPDF inputs manageable.
 3. `03_ocr` — `ocr_pdf` runs OCRmyPDF with `OCR_OPTS` plus `-l <ocr-lang>` (currently `--optimize 1 --output-type pdf`; lossless optimization only, plain PDF, not PDF/A, so page images pass through unchanged). `--deskew` and `--rotate-pages` are present but commented out in `OCR_OPTS`. If OCR fails for any chunk it raises, failing the whole folder (no non-OCR fallback).
 4. `04_merged` — `merge_all_pdfs_in_dir` combines all OCR'd chunks; if larger than `--max-mb`, `split_final_pdf_by_size` splits it into `-partNN` files.

@@ -77,6 +77,7 @@ Other settings are constants at the top of `image_to_pdf.py`:
 | `IMAGEMAGICK_CMD`         | ImageMagick command: `convert` for version 6, `magick` for version 7  |
 | `IMAGEMAGICK_INPUT_OPTS`  | ImageMagick options before the input file (e.g. `-density`)           |
 | `IMAGEMAGICK_OUTPUT_OPTS` | ImageMagick options after the input file (resize limit, JPEG quality) |
+| `CONVERT_JOBS`            | Images converted in parallel (default: CPU count; lower if memory runs out) |
 | `OCR_OPTS`                | OCRmyPDF options (language comes from `--ocr-lang`)                   |
 | `PRE_OCR_MAX_MB`          | Batch size for OCR (step 2)                                           |
 
