@@ -32,6 +32,7 @@ python image_to_pdf.py <folder> [options]
 | ------------------- | -------------------------------------------------------------- | --------- |
 | `--max-mb=<size>`   | Maximum size of each final PDF in MB; larger output is split   | `100`     |
 | `--ocr-lang=<lang>` | OCR languages, passed to OCRmyPDF `-l` (e.g. `eng`, `deu+eng`) | `deu+eng` |
+| `--no-ocr`          | Skip text recognition; OCRmyPDF still applies `OCR_OPTS`       | off       |
 
 Example: `python image_to_pdf.py /path/to/images --ocr-lang=eng --max-mb=150`
 

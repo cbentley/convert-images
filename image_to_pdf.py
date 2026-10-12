@@ -88,7 +88,7 @@ def setup_logging(log_file: Path) -> None:
 # ============================================================
 
 def validate_external_tools() -> None:
-    """Verify ImageMagick and OCRmyPDF are available (OCR mandatory)."""
+    """Verify ImageMagick and OCRmyPDF are available (OCRmyPDF runs even with --no-ocr)."""
     tools = {
         f"ImageMagick ({IMAGEMAGICK_CMD})": [IMAGEMAGICK_CMD, "--version"],
         "OCRmyPDF": [OCR_CMD, "--version"],
@@ -303,20 +303,25 @@ def split_final_pdf_by_size(input_pdf: Path, output_dir: Path, max_mb: int) -> l
 # OCR
 # ============================================================
 
-def ocr_pdf(input_pdf: Path, output_pdf: Path, ocr_lang: str) -> None:
+def ocr_pdf(input_pdf: Path, output_pdf: Path, ocr_lang: str, no_ocr: bool = False) -> None:
     """
-    Apply OCR to a PDF, writing the result to output_pdf.
-    Raises RuntimeError if OCR fails (OCR is mandatory; there is no fallback).
+    Run OCRmyPDF on a PDF, writing the result to output_pdf.
+
+    With no_ocr, text recognition is skipped ("--tesseract-timeout 0") but the
+    rest of OCR_OPTS (e.g. --optimize) still applies.
+    Raises RuntimeError if OCRmyPDF fails (there is no fallback).
     """
     cmd = [
         OCR_CMD,
         *OCR_OPTS,
+        *(["--tesseract-timeout", "0"] if no_ocr else []),
         "-l", ocr_lang,
         str(input_pdf),
         str(output_pdf),
     ]
 
-    logger.info(f"  OCRing {input_pdf.name} -> {output_pdf.name}...")
+    action = "Optimizing (no OCR)" if no_ocr else "OCRing"
+    logger.info(f"  {action} {input_pdf.name} -> {output_pdf.name}...")
 
     result = subprocess.run(
         cmd,
@@ -331,7 +336,7 @@ def ocr_pdf(input_pdf: Path, output_pdf: Path, ocr_lang: str) -> None:
             f"OCR failed for {input_pdf.name} (OCRmyPDF exit code {result.returncode})"
         )
 
-    logger.info(f"  Finished OCR: {output_pdf.name}")
+    logger.info(f"  Finished {'optimizing' if no_ocr else 'OCR'}: {output_pdf.name}")
 
 
 # ============================================================
@@ -351,6 +356,11 @@ def parse_args(argv=None):
         "--ocr-lang",
         default="deu+eng",
         help='Languages to use for OCR. Examples: "eng", "deu", "eng+deu".'
+    )
+    parser.add_argument(
+        "--no-ocr",
+        action="store_true",
+        help="Skip text recognition. OCRmyPDF still runs, so OCR_OPTS such as --optimize still apply."
     )
     return parser.parse_args(argv)
 
@@ -440,22 +450,22 @@ def main(argv=None) -> int:
             # 2. Pre-OCR merge: all pages into one PDF in _work/02_pre_ocr
             pre_ocr_pdf = merge_pdfs(page_pdfs, pre_ocr_dir / f"{base_name}.pdf")
 
-            # 3. OCR the merged PDF into _work/03_ocr
+            # 3. OCR the merged PDF into _work/03_ocr (with --no-ocr, OCR_OPTS only)
             ocr_output = ocr_dir / f"{base_name}.pdf"
-            ocr_pdf(pre_ocr_pdf, ocr_output, args.ocr_lang)
+            ocr_pdf(pre_ocr_pdf, ocr_output, args.ocr_lang, args.no_ocr)
 
             # 4. Split into parts in _work/04_split if over --max-mb
             final_size = pdf_size_mb(ocr_output)
 
             if final_size > args.max_mb:
                 logger.info(
-                    f"  OCRed PDF {ocr_output.name} is {final_size:.1f} MB "
+                    f"  PDF {ocr_output.name} is {final_size:.1f} MB "
                     f"(>{args.max_mb} MB); splitting..."
                 )
                 final_outputs = split_final_pdf_by_size(ocr_output, split_dir, args.max_mb)
             else:
                 logger.info(
-                    f"  OCRed PDF {ocr_output.name} is {final_size:.1f} MB "
+                    f"  PDF {ocr_output.name} is {final_size:.1f} MB "
                     f"(<= {args.max_mb} MB); no splitting needed."
                 )
                 final_outputs = [ocr_output]
