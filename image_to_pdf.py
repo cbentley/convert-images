@@ -57,11 +57,6 @@ OCR_OPTS = [
     "--output-type", "pdf",
 ]
 
-# --- Merging ---
-# Size limit (MB) for merged chunks fed to OCR
-PRE_OCR_MAX_MB = 50
-
-
 # ============================================================
 # LOGGING SETUP
 # ============================================================
@@ -182,144 +177,16 @@ def convert_all_images(folder: Path, single_pages_dir: Path) -> list[Path]:
 
 
 # ============================================================
-# MERGING (PRE-OCR CHUNKS)
+# MERGE (PRE-OCR) & SPLIT (POST-OCR)
 # ============================================================
-
-def create_empty_pdf(path: Path) -> None:
-    """Create an empty PDF at the given path."""
-    with pikepdf.Pdf.new() as pdf:
-        pdf.save(path)
-
-
-def open_pdf(path: Path):
-    """Open a PDF with allow_overwriting_input=True."""
-    return pikepdf.open(path, allow_overwriting_input=True)
-
 
 def pdf_size_mb(path: Path) -> float:
     """Return the size of the PDF in megabytes."""
     return path.stat().st_size / 1_000_000
 
 
-def finalize_part(pdf, path: Path, merged_files: list[Path]) -> None:
-    """
-    Close and record a completed part-PDF.
-    """
-    size_mb = pdf_size_mb(path)
-    logger.info(f"  Finalized {path.name} ({size_mb:.1f} MB)")
-    pdf.close()
-    merged_files.append(path)
-
-
-def apply_dynamic_padding(
-    merged_files: list[Path],
-    output_base: str
-) -> list[Path]:
-    """
-    Retroactively rename merged files using minimal-width padding so lexical
-    ordering matches numeric ordering.
-    """
-    max_part = len(merged_files)
-    width = len(str(max_part))  # number of digits needed
-
-    updated_files = []
-    for i, old_path in enumerate(merged_files, start=1):
-        new_name = f"{output_base}-part{str(i).zfill(width)}.pdf"
-        new_path = old_path.with_name(new_name)
-
-        if old_path != new_path:
-            old_path.rename(new_path)
-
-        updated_files.append(new_path)
-
-    return updated_files
-
-
-def merge_pages_into_chunks(
-    page_pdfs: list[Path],
-    output_base: str,
-    pdf_output_dir: Path,
-    max_mb: int
-) -> list[Path]:
-    """
-    Merge single-page PDFs into size-limited multi-page PDFs, enforcing max_mb.
-
-    This is used for pre-OCR merging with a hardcoded PRE_OCR_MAX_MB.
-    """
-    merged_files: list[Path] = []
-
-    part = 1
-    current_pdf = pdf_output_dir / f"{output_base}-part{part}.pdf"
-
-    # Create first empty PDF
-    create_empty_pdf(current_pdf)
-    pdf = open_pdf(current_pdf)
-
-    for page_pdf in page_pdfs:
-        with pikepdf.open(page_pdf) as page_doc:
-            pdf.pages.extend(page_doc.pages)
-            pdf.save(current_pdf)
-            size_mb = pdf_size_mb(current_pdf)
-
-        # Size check happens OUTSIDE the inner with.
-        # A page alone in its part stays there even if oversized (it can't be split).
-        if size_mb > max_mb and len(pdf.pages) > 1:
-            # Undo the last page
-            del pdf.pages[-1]
-            pdf.save(current_pdf)
-
-            finalize_part(pdf, current_pdf, merged_files)
-
-            # Start next part
-            part += 1
-            current_pdf = pdf_output_dir / f"{output_base}-part{part}.pdf"
-
-            create_empty_pdf(current_pdf)
-            pdf = open_pdf(current_pdf)
-
-            # Re-add the page we deferred
-            with pikepdf.open(page_pdf) as page_doc:
-                pdf.pages.extend(page_doc.pages)
-                pdf.save(current_pdf)
-            size_mb = pdf_size_mb(current_pdf)
-
-        if size_mb > max_mb:
-            logger.warning(
-                f"  {page_pdf.name} alone is {size_mb:.1f} MB (> {max_mb} MB); "
-                f"keeping it as an oversized part"
-            )
-
-    # Final PDF
-    finalize_part(pdf, current_pdf, merged_files)
-
-    # If only one PDF, rename part→base and skip dynamic padding
-    if len(merged_files) == 1:
-        only_pdf = merged_files[0]
-        new_name = only_pdf.with_name(f"{output_base}.pdf")
-        if only_pdf.name != new_name.name:
-            only_pdf.rename(new_name)
-            merged_files[0] = new_name
-        return merged_files
-
-    # Retroactive dynamic padding
-    return apply_dynamic_padding(merged_files, output_base)
-
-
-# ============================================================
-# POST-OCR MERGE & SPLIT (IN _work/merged)
-# ============================================================
-
-def merge_all_pdfs_in_dir(pdf_dir: Path, output_pdf: Path) -> Path:
-    """
-    Merge all PDFs in pdf_dir into a single PDF at output_pdf.
-    Existing output_pdf is excluded from the input set if present.
-    """
-    pdf_files = sorted(
-        p for p in pdf_dir.glob("*.pdf") if p.resolve() != output_pdf.resolve()
-    )
-    if not pdf_files:
-        raise RuntimeError(f"No PDFs found to merge in {pdf_dir}")
-
+def merge_pdfs(pdf_files: list[Path], output_pdf: Path) -> Path:
+    """Merge pdf_files, in order, into a single PDF at output_pdf."""
     with pikepdf.Pdf.new() as merged:
         for pdf in pdf_files:
             with pikepdf.open(pdf) as src:
@@ -330,61 +197,106 @@ def merge_all_pdfs_in_dir(pdf_dir: Path, output_pdf: Path) -> Path:
     return output_pdf
 
 
-def split_final_pdf_by_size(input_pdf: Path, max_mb: int) -> list[Path]:
+def page_object_sizes(page: pikepdf.Page) -> dict[tuple[int, int], int]:
     """
-    Split a single large PDF into <= max_mb parts, using a page-based split.
+    Approximate the saved size in bytes of each indirect object a page uses
+    (content streams, images, fonts), keyed by object id so objects shared
+    between pages can be counted once.
+    """
+    sizes: dict[tuple[int, int], int] = {}
+    stack = [page.obj]
+    while stack:
+        obj = stack.pop()
+        if not isinstance(obj, pikepdf.Object):
+            continue  # numbers and booleans come back as plain Python values
+        if obj.is_indirect:
+            if obj.objgen in sizes:
+                continue
+            if isinstance(obj, pikepdf.Stream):
+                size = len(obj.read_raw_bytes()) + len(obj.stream_dict.unparse())
+            else:
+                size = len(obj.unparse(resolved=True))
+            sizes[obj.objgen] = size
+        if isinstance(obj, pikepdf.Stream):
+            obj = obj.stream_dict
+        if isinstance(obj, pikepdf.Dictionary):
+            # /Parent leads back up to the page tree and every other page
+            stack.extend(v for k, v in obj.items() if k != "/Parent")
+        elif isinstance(obj, pikepdf.Array):
+            stack.extend(obj)
+    return sizes
+
+
+def save_page_range(src: pikepdf.Pdf, start: int, end: int, path: Path) -> float:
+    """Save pages [start, end) of src as a new PDF at path; return its size in MB."""
+    with pikepdf.Pdf.new() as pdf:
+        pdf.pages.extend(src.pages[start:end])
+        pdf.save(path)
+    return pdf_size_mb(path)
+
+
+def split_final_pdf_by_size(input_pdf: Path, output_dir: Path, max_mb: int) -> list[Path]:
+    """
+    Split a PDF into parts of at most max_mb, each holding as many pages as fit.
+
+    Pages per part are first estimated from page_object_sizes, then corrected
+    with real saves: pages are removed while the part is over max_mb and added
+    while it still fits. This gives the same parts as adding and saving one
+    page at a time, with only a few saves per part. A page alone in its part
+    stays there even if oversized (it can't be split).
 
     Output files are named "<stem>-part01.pdf", "<stem>-part02.pdf", etc.
-    The original input_pdf is removed if splitting succeeds.
     """
-    merged_files: list[Path] = []
-    base_name = input_pdf.stem
-    pdf_output_dir = input_pdf.parent
-
-    part = 1
-    current_pdf = pdf_output_dir / f"{base_name}-part{part:02d}.pdf"
-
-    create_empty_pdf(current_pdf)
-    pdf = open_pdf(current_pdf)
+    output_files: list[Path] = []
+    max_bytes = max_mb * 1_000_000
 
     with pikepdf.open(input_pdf) as src:
-        for page_num, page in enumerate(src.pages, start=1):
-            pdf.pages.append(page)
-            pdf.save(current_pdf)
-            size_mb = pdf_size_mb(current_pdf)
+        page_sizes = [page_object_sizes(page) for page in src.pages]
+        page_count = len(page_sizes)
 
-            # A page alone in its part stays there even if oversized (it can't be split)
-            if size_mb > max_mb and len(pdf.pages) > 1:
-                # Undo the last page
-                del pdf.pages[-1]
-                pdf.save(current_pdf)
+        start = 0
+        while start < page_count:
+            # Estimate: add pages while the part's distinct objects fit (at least one page)
+            end = start
+            seen: set[tuple[int, int]] = set()
+            estimate = 0
+            while end < page_count:
+                new = {k: v for k, v in page_sizes[end].items() if k not in seen}
+                if end > start and estimate + sum(new.values()) > max_bytes:
+                    break
+                seen.update(new)
+                estimate += sum(new.values())
+                end += 1
 
-                finalize_part(pdf, current_pdf, merged_files)
+            part_pdf = output_dir / f"{input_pdf.stem}-part{len(output_files) + 1:02d}.pdf"
+            trial_pdf = part_pdf.with_suffix(".trial.pdf")
+            size_mb = save_page_range(src, start, end, part_pdf)
 
-                # Start next part
-                part += 1
-                current_pdf = pdf_output_dir / f"{base_name}-part{part:02d}.pdf"
+            # Estimate too high: remove pages until the part fits
+            while size_mb > max_mb and end - start > 1:
+                end -= 1
+                size_mb = save_page_range(src, start, end, part_pdf)
 
-                create_empty_pdf(current_pdf)
-                pdf = open_pdf(current_pdf)
-
-                # Re-add the page we deferred
-                pdf.pages.append(page)
-                pdf.save(current_pdf)
-                size_mb = pdf_size_mb(current_pdf)
+            # Estimate too low: add pages while the part still fits
+            while size_mb <= max_mb and end < page_count:
+                trial_mb = save_page_range(src, start, end + 1, trial_pdf)
+                if trial_mb > max_mb:
+                    trial_pdf.unlink()
+                    break
+                trial_pdf.replace(part_pdf)
+                end += 1
+                size_mb = trial_mb
 
             if size_mb > max_mb:
                 logger.warning(
-                    f"  Page {page_num} alone is {size_mb:.1f} MB (> {max_mb} MB); "
+                    f"  Page {start + 1} alone is {size_mb:.1f} MB (> {max_mb} MB); "
                     f"keeping it as an oversized part"
                 )
+            logger.info(f"  Finalized {part_pdf.name} ({size_mb:.1f} MB, {end - start} pages)")
+            output_files.append(part_pdf)
+            start = end
 
-    finalize_part(pdf, current_pdf, merged_files)
-
-    # Remove the original big PDF now that parts exist
-    input_pdf.unlink()
-
-    return merged_files
+    return output_files
 
 
 # ============================================================
@@ -420,22 +332,6 @@ def ocr_pdf(input_pdf: Path, output_pdf: Path, ocr_lang: str) -> None:
         )
 
     logger.info(f"  Finished OCR: {output_pdf.name}")
-
-
-def ocr_all_pdfs(src_dir: Path, dst_dir: Path, ocr_lang: str) -> list[Path]:
-    """
-    Run OCR on all PDFs in src_dir, writing outputs to dst_dir.
-    Returns the list of resulting PDF paths in dst_dir.
-    """
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    result_paths: list[Path] = []
-
-    for pdf in sorted(src_dir.glob("*.pdf")):
-        output_pdf = dst_dir / pdf.name
-        ocr_pdf(pdf, output_pdf, ocr_lang)
-        result_paths.append(output_pdf)
-
-    return result_paths
 
 
 # ============================================================
@@ -524,13 +420,13 @@ def main(argv=None) -> int:
         single_pages_dir = work_dir / "01_single_pages"
         pre_ocr_dir      = work_dir / "02_pre_ocr"
         ocr_dir          = work_dir / "03_ocr"
-        merged_dir       = work_dir / "04_merged"
+        split_dir        = work_dir / "04_split"
 
         # Ensure work subfolders exist
         single_pages_dir.mkdir(parents=True, exist_ok=True)
         pre_ocr_dir.mkdir(parents=True, exist_ok=True)
         ocr_dir.mkdir(parents=True, exist_ok=True)
-        merged_dir.mkdir(parents=True, exist_ok=True)
+        split_dir.mkdir(parents=True, exist_ok=True)
 
         folder_success = True
 
@@ -541,47 +437,30 @@ def main(argv=None) -> int:
                 # No PDFs to process; leave work_dir empty for this folder
                 continue
 
-            # 2. Pre-OCR merge: size-limited chunks (<= PRE_OCR_MAX_MB) into _work/pre_ocr
-            output_base = f"{base_name}_pre"
-            merged_pre_ocr = merge_pages_into_chunks(
-                page_pdfs,
-                output_base,
-                pre_ocr_dir,
-                PRE_OCR_MAX_MB,
-            )
-            logger.info(
-                f"  Created {len(merged_pre_ocr)} pre-OCR merged PDFs in: {pre_ocr_dir}"
-            )
+            # 2. Pre-OCR merge: all pages into one PDF in _work/02_pre_ocr
+            pre_ocr_pdf = merge_pdfs(page_pdfs, pre_ocr_dir / f"{base_name}.pdf")
 
-            # 3. OCR on all pre-OCR merged PDFs into _work/ocr
-            logger.info("  Running OCR on pre-merged PDFs...")
-            ocr_outputs = ocr_all_pdfs(pre_ocr_dir, ocr_dir, args.ocr_lang)
-            if not ocr_outputs:
-                raise RuntimeError("OCR stage produced no PDFs.")
+            # 3. OCR the merged PDF into _work/03_ocr
+            ocr_output = ocr_dir / f"{base_name}.pdf"
+            ocr_pdf(pre_ocr_pdf, ocr_output, args.ocr_lang)
 
-            # 4. Post-OCR merge: merge all PDFs in _work/ocr into one big PDF in _work/merged
-            logger.info("  Merging all OCRed PDFs into single final PDF (in work dir)...")
-            combined_pdf_work = merged_dir / f"{base_name}.pdf"
-            merge_all_pdfs_in_dir(ocr_dir, combined_pdf_work)
-
-            # 5. Post-OCR split: in _work/merged, then move to root
-            final_size = pdf_size_mb(combined_pdf_work)
-            final_outputs: list[Path] = []
+            # 4. Split into parts in _work/04_split if over --max-mb
+            final_size = pdf_size_mb(ocr_output)
 
             if final_size > args.max_mb:
                 logger.info(
-                    f"  Combined PDF {combined_pdf_work.name} is {final_size:.1f} MB "
+                    f"  OCRed PDF {ocr_output.name} is {final_size:.1f} MB "
                     f"(>{args.max_mb} MB); splitting..."
                 )
-                final_outputs = split_final_pdf_by_size(combined_pdf_work, args.max_mb)
+                final_outputs = split_final_pdf_by_size(ocr_output, split_dir, args.max_mb)
             else:
                 logger.info(
-                    f"  Combined PDF {combined_pdf_work.name} is {final_size:.1f} MB "
+                    f"  OCRed PDF {ocr_output.name} is {final_size:.1f} MB "
                     f"(<= {args.max_mb} MB); no splitting needed."
                 )
-                final_outputs = [combined_pdf_work]
+                final_outputs = [ocr_output]
 
-            # 6. Move final PDFs from _work/merged to root folder, overwriting if needed
+            # 5. Move final PDFs from _work to root folder, overwriting if needed
             for pdf in final_outputs:
                 dest = root_path / pdf.name
                 if dest.exists():
@@ -606,7 +485,7 @@ def main(argv=None) -> int:
             cleanup_partial_outputs(root_path, base_name)
             continue
         finally:
-            # 7. Clean up work directory on success; keep on failure
+            # 6. Clean up work directory on success; keep on failure
             if folder_success:
                 try:
                     shutil.rmtree(work_dir)

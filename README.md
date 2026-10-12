@@ -55,10 +55,10 @@ Each image folder is processed in its own `_work` directory:
 
 | Step             | Work directory          | What happens                                                                                                                                                                             |
 | ---------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Convert       | `_work/01_single_pages` | ImageMagick turns each image into a one-page PDF. Images over 3500 px on the long side are scaled down to 3500 px, and pages are stored as JPEG quality 75. This is the only lossy step. |
-| 2. Batch         | `_work/02_pre_ocr`      | Pages are merged into batches of up to 50 MB for OCR.                                                                                                                                    |
-| 3. OCR           | `_work/03_ocr`          | OCRmyPDF adds a searchable text layer without changing the images.                                                                                                                       |
-| 4. Merge & split | `_work/04_merged`       | Batches are merged into one PDF, which is split into parts if it exceeds `--max-mb`.                                                                                                     |
+| 1. Convert       | `_work/01_single_pages` | ImageMagick turns each image into a one-page PDF. By default, images over 3500 px on the long side are scaled down to 3500 px, and pages are stored as JPEG quality 75.                  |
+| 2. Merge         | `_work/02_pre_ocr`      | All pages are merged into one PDF.                                                                                                                                                       |
+| 3. OCR           | `_work/03_ocr`          | OCRmyPDF adds a searchable text layer. Depending on `OCR_OPTS`, it may also re-compress the page images (see Configuration).                                                             |
+| 4. Split         | `_work/04_split`        | If the PDF exceeds `--max-mb`, it is split into parts, each holding as many pages as fit.                                                                                                |
 | 5. Finish        |                         | The final PDFs are moved into the image folder and `_work` is deleted.                                                                                                                   |
 
 ### Errors
@@ -79,6 +79,5 @@ Other settings are constants at the top of `image_to_pdf.py`:
 | `IMAGEMAGICK_OUTPUT_OPTS` | ImageMagick options after the input file (resize limit, JPEG quality) |
 | `CONVERT_JOBS`            | Images converted in parallel (default: CPU count; lower if memory runs out) |
 | `OCR_OPTS`                | OCRmyPDF options (language comes from `--ocr-lang`)                   |
-| `PRE_OCR_MAX_MB`          | Batch size for OCR (step 2)                                           |
 
 These OCRmyPDF options re-encode every page image, adding a second lossy compression: `--optimize 2` or `3`, `--deskew`, and PDF/A output (the default if `--output-type pdf` is removed). `--rotate-pages` is lossless.
