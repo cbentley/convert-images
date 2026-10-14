@@ -38,8 +38,13 @@ IMAGEMAGICK_CMD = "convert" # Set to "magick" for ImageMagick versions > 6
 # Placed before the input file (read settings; -density must go here).
 # "-limit thread 1" keeps each process single-threaded, since CONVERT_JOBS already runs one per core.
 IMAGEMAGICK_INPUT_OPTS = ["-limit", "thread", "1", "-density", "300"]
+# sRGB ICC profile. Images with an embedded profile (e.g. Adobe RGB) are converted to sRGB;
+# untagged RGB images are tagged as sRGB without changing pixels; untagged gray/CMYK are left as is.
+# Ubuntu: from the icc-profiles-free package. macOS: "/System/Library/ColorSync/Profiles/sRGB Profile.icc"
+SRGB_PROFILE = "/usr/share/color/icc/sRGB.icc"
 # Placed after the input file (processing and output encoding)
 IMAGEMAGICK_OUTPUT_OPTS = [
+    "-profile", SRGB_PROFILE, # Before -resize, so pixels are converted before resizing and encoding
     "-resize", "3500x3500>",
     "-quality", "75",
     "-compress", "jpeg",
@@ -88,7 +93,7 @@ def setup_logging(log_file: Path) -> None:
 # ============================================================
 
 def validate_external_tools() -> None:
-    """Verify ImageMagick and OCRmyPDF are available (OCRmyPDF runs even with --no-ocr)."""
+    """Verify ImageMagick, OCRmyPDF and the sRGB profile are available (OCRmyPDF runs even with --no-ocr)."""
     tools = {
         f"ImageMagick ({IMAGEMAGICK_CMD})": [IMAGEMAGICK_CMD, "--version"],
         "OCRmyPDF": [OCR_CMD, "--version"],
@@ -106,6 +111,11 @@ def validate_external_tools() -> None:
         except Exception:
             logger.error(f"{name} is missing or not working. Check installation.")
             raise
+
+    if not Path(SRGB_PROFILE).is_file():
+        logger.error(f"sRGB profile not found: {SRGB_PROFILE}. Check SRGB_PROFILE.")
+        raise FileNotFoundError(SRGB_PROFILE)
+    logger.info(f"sRGB profile found: {SRGB_PROFILE}")
 
 
 # ============================================================

@@ -4,11 +4,11 @@ Converts folders of scanned images into searchable, size-limited PDFs. Built for
 
 ## Setup
 
-Requires ImageMagick and OCRmyPDF (with Ghostscript and Tesseract language packs):
+Requires ImageMagick, OCRmyPDF (with Ghostscript and Tesseract language packs) and an sRGB ICC profile (see `SRGB_PROFILE`):
 
 ```bash
 # Ubuntu
-sudo apt update && sudo apt install -y imagemagick ocrmypdf tesseract-ocr-all
+sudo apt update && sudo apt install -y imagemagick ocrmypdf tesseract-ocr-all icc-profiles-free
 
 # macOS
 brew install imagemagick ghostscript ocrmypdf tesseract-lang
@@ -56,7 +56,7 @@ Each image folder is processed in its own `_work` directory:
 
 | Step             | Work directory          | What happens                                                                                                                                                                             |
 | ---------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Convert       | `_work/01_single_pages` | ImageMagick turns each image into a one-page PDF. By default, images over 3500 px on the long side are scaled down to 3500 px, and pages are stored as JPEG quality 75.                  |
+| 1. Convert       | `_work/01_single_pages` | ImageMagick turns each image into a one-page PDF. Colors are converted to sRGB. By default, images over 3500 px on the long side are scaled down to 3500 px, and pages are stored as JPEG quality 75.                  |
 | 2. Merge         | `_work/02_pre_ocr`      | All pages are merged into one PDF.                                                                                                                                                       |
 | 3. OCR           | `_work/03_ocr`          | OCRmyPDF adds a searchable text layer. Depending on `OCR_OPTS`, it may also re-compress the page images (see Configuration).                                                             |
 | 4. Split         | `_work/04_split`        | If the PDF exceeds `--max-mb`, it is split into parts, each holding as many pages as fit.                                                                                                |
@@ -77,7 +77,8 @@ Other settings are constants at the top of `image_to_pdf.py`:
 | `GENERIC_FOLDER_NAMES`    | Folder names that take their output name from the parent folder       |
 | `IMAGEMAGICK_CMD`         | ImageMagick command: `convert` for version 6, `magick` for version 7  |
 | `IMAGEMAGICK_INPUT_OPTS`  | ImageMagick options before the input file (e.g. `-density`)           |
-| `IMAGEMAGICK_OUTPUT_OPTS` | ImageMagick options after the input file (resize limit, JPEG quality) |
+| `SRGB_PROFILE`            | Path to the sRGB ICC profile pages are converted to                   |
+| `IMAGEMAGICK_OUTPUT_OPTS` | ImageMagick options after the input file (sRGB conversion, resize limit, JPEG quality) |
 | `CONVERT_JOBS`            | Images converted in parallel (default: CPU count; lower if memory runs out) |
 | `OCR_OPTS`                | OCRmyPDF options (language comes from `--ocr-lang`)                   |
 
