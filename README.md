@@ -38,7 +38,7 @@ Example: `python image_to_pdf.py /path/to/images --ocr-lang=eng --max-mb=150`
 
 ## What it does
 
-The script searches `<folder>` and all its subfolders. Every folder that directly contains images (`.tif`, `.tiff`, `.jpg`, `.jpeg`, `.jp2`) produces its own PDF; images are never combined across folders. Pages are sorted by filename.
+The script searches `<folder>` and all its subfolders. Every folder that directly contains images (`.tif`, `.tiff`, `.jpg`, `.jpeg`, `.jp2`) produces its own PDF; images are never combined across folders. Pages are sorted by filename in natural order, like Windows Explorer: numbers by value (`page2` before `page10`), ignoring case.
 
 Skipped:
 - folders whose names start with `_`

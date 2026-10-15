@@ -10,6 +10,7 @@ See README.md for full documentation.
 
 
 import os
+import re
 import shutil
 import argparse
 import datetime
@@ -150,10 +151,18 @@ def is_wanted_image(path: Path) -> bool:
     return is_allowed_ext(path) and not is_excluded(path)
 
 
+def natural_sort_key(path: Path) -> tuple:
+    """Sort key ordering filenames like Windows Explorer: numbers by value (2 before 10), case ignored.
+    The full name breaks ties between names that differ only in padding or case (p_1 vs p_01)."""
+    # re.split with a capture group alternates text and digit runs, so odd indexes are always digits
+    parts = re.split(r"(\d+)", path.name)
+    return ([int(t) if i % 2 else t.lower() for i, t in enumerate(parts)], path.name)
+
+
 def convert_all_images(folder: Path, single_pages_dir: Path) -> list[Path]:
     """Convert all allowed images in a folder into single-page PDFs."""
     candidates = [p for p in folder.iterdir() if is_allowed_ext(p)]
-    images = sorted(p for p in candidates if not is_excluded(p))
+    images = sorted((p for p in candidates if not is_excluded(p)), key=natural_sort_key)
     skipped = sorted(p.name for p in candidates if is_excluded(p))
     if skipped:
         logger.info(f"  Skipped {len(skipped)} excluded image(s): {', '.join(skipped)}")
