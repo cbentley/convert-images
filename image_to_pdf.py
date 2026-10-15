@@ -354,7 +354,7 @@ def ocr_pdf(input_pdf: Path, output_pdf: Path, ocr_lang: str, no_ocr: bool = Fal
 # ============================================================
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(...)
+    parser = argparse.ArgumentParser(description="Convert folders of scanned images to OCR'd PDFs.")
     parser.add_argument("folder")
     parser.add_argument(
         "--max-mb",
