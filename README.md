@@ -22,6 +22,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+To work on the script, install `requirements-dev.txt` instead: it includes `requirements.txt` and adds pytest (see Tests).
+
 ## Usage
 
 ```bash
@@ -83,12 +85,11 @@ Exit status: `0` if all folders succeeded, `1` if any failed, `2` for invalid op
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt
 python -m pytest                       # all tests
 python -m pytest -m "not integration"  # skip the tests that run ImageMagick and OCRmyPDF
 ```
 
-The integration tests generate their own small images and are skipped if ImageMagick, the sRGB profile, OCRmyPDF or Tesseract's English data is missing.
+Needs `requirements-dev.txt` (see Setup). The integration tests generate their own small images and are skipped if ImageMagick, the sRGB profile, OCRmyPDF or Tesseract's English data is missing.
 
 ## Configuration
 
