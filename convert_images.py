@@ -71,8 +71,10 @@ PDF_QUALITY = 75
 JPG_MAX_SIZE = None
 JPG_QUALITY = 90
 
-# --- OCRmyPDF (language is set by --ocr-lang) ---
+# --- OCRmyPDF ---
 OCR_CMD = "ocrmypdf"
+# Languages used when --ocr-lang isn't given
+DEFAULT_OCR_LANG = "deu+eng"
 OCR_OPTS = [
     "--optimize", "3",  # Select 3 for general use, 1 for higher quality (and larger files). 2 and 3 re-encode page images.
     #"--deskew",  # Re-encodes page images
@@ -370,19 +372,20 @@ def merge_pdfs(pdf_files: list[Path], output_pdf: Path) -> Path:
     return output_pdf
 
 
-def ocr_pdf(input_pdf: Path, output_pdf: Path, ocr_lang: str, no_ocr: bool = False) -> None:
+def ocr_pdf(input_pdf: Path, output_pdf: Path, ocr_lang: str | None) -> None:
     """
     Run OCRmyPDF on a PDF, writing the result to output_pdf.
 
-    With no_ocr, text recognition is skipped ("--tesseract-timeout 0") but the
-    rest of OCR_OPTS (e.g. --optimize) still applies.
+    With ocr_lang None, text recognition is skipped ("--tesseract-timeout 0") but the
+    rest of OCR_OPTS (e.g. --optimize) still applies. "-l" is then left out, so OCRmyPDF
+    only checks for English, which comes with Tesseract.
     Raises RuntimeError if OCRmyPDF fails (there is no fallback).
     """
+    no_ocr = ocr_lang is None
     cmd = [
         OCR_CMD,
         *OCR_OPTS,
-        *(["--tesseract-timeout", "0"] if no_ocr else []),
-        "-l", ocr_lang,
+        *(["--tesseract-timeout", "0"] if no_ocr else ["-l", ocr_lang]),
         str(input_pdf),
         str(output_pdf),
     ]
@@ -533,8 +536,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     pdf_parser.add_argument(
         "--ocr-lang",
-        default="deu+eng",
-        help='Languages to use for OCR. Examples: "eng", "deu", "eng+deu". Default: %(default)s'
+        help=f'Languages to use for OCR. Examples: "eng", "deu", "eng+deu". Default: {DEFAULT_OCR_LANG}'
     )
     pdf_parser.add_argument(
         "--no-ocr",
@@ -561,6 +563,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if not Path(args.folder).is_dir():
         parser.error(f"folder not found: {args.folder}")
+    # Left as None with --no-ocr, so main() can tell if a given --ocr-lang is ignored
+    if args.make_pdf and not args.no_ocr and args.ocr_lang is None:
+        args.ocr_lang = DEFAULT_OCR_LANG
     return args
 
 
@@ -629,7 +634,7 @@ def make_final_pdfs(page_pdfs: list[Path], work_dir: Path, base_name: str, args:
 
     # 3. OCR (with --no-ocr, only the rest of OCR_OPTS applies)
     ocr_output = ocr_dir / f"{base_name}.pdf"
-    ocr_pdf(pre_ocr_pdf, ocr_output, args.ocr_lang, args.no_ocr)
+    ocr_pdf(pre_ocr_pdf, ocr_output, None if args.no_ocr else args.ocr_lang)
 
     # 4. Split if over --max-mb
     ocr_size_mb = size_mb(ocr_output)
@@ -726,6 +731,8 @@ def main(argv=None) -> int:
     log_file = setup_logging(input_folder)
     outputs = " and ".join(name for name, wanted in (("PDFs", args.make_pdf), ("JPEGs", args.make_jpg)) if wanted)
     logger.info(f"Converting images to {outputs} in {input_folder}")
+    if args.make_pdf and args.no_ocr and args.ocr_lang:
+        logger.warning(f"Ignoring --ocr-lang {args.ocr_lang}: no text is recognized with --no-ocr")
     validate_external_tools(need_ocrmypdf=args.make_pdf)
 
     failed_folders = [folder for folder in find_image_folders(input_folder) if not process_folder(folder, args)]

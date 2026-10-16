@@ -35,7 +35,7 @@ Options for `pdf`:
 | ------------------- | -------------------------------------------------------------- | --------- |
 | `--max-mb=<size>`   | Maximum size of each final PDF in MB; larger output is split   | `100`     |
 | `--ocr-lang=<lang>` | OCR languages, passed to OCRmyPDF `-l` (e.g. `eng`, `deu+eng`) | `deu+eng` |
-| `--no-ocr`          | Skip text recognition; OCRmyPDF still applies `OCR_OPTS`       | off       |
+| `--no-ocr`          | Skip text recognition (`--ocr-lang` is ignored); OCRmyPDF still applies `OCR_OPTS` | off |
 | `--jpg`             | Also save each image as a JPEG, as `jpg` does                  | off       |
 
 `jpg` has no options. Examples:
@@ -97,6 +97,7 @@ Other settings are constants at the top of `convert_images.py`:
 | `CONVERT_JOBS`            | Images converted in parallel (default: CPU count; lower if memory runs out) |
 | `PDF_MAX_SIZE`, `JPG_MAX_SIZE` | Longest side in pixels for PDF page images and JPEGs (`None` keeps full size) |
 | `PDF_QUALITY`, `JPG_QUALITY` | JPEG quality for PDF page images and JPEGs (below 90, color resolution is halved) |
+| `DEFAULT_OCR_LANG`        | OCR languages used when `--ocr-lang` isn't given                      |
 | `OCR_OPTS`                | OCRmyPDF options (language comes from `--ocr-lang`)                   |
 
 These OCRmyPDF options re-encode every page image, adding a second lossy compression: `--optimize 2` or `3`, `--deskew`, and PDF/A output (the default if `--output-type pdf` is removed). `--rotate-pages` is lossless.
