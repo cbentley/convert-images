@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A single-file CLI (`convert_images.py`) that turns folders of scanned images (`.tif/.tiff/.jpg/.jpeg/.jp2`) into OCR'd, size-capped PDFs (`pdf` subcommand) and/or standalone JPEGs (`jpg` subcommand, or `pdf --jpg` for both). `README.md` documents user-facing behavior and options.
+A single-file CLI (`convert_images.py`) that turns folders of scanned images (`.tif/.tiff/.jpg/.jpeg/.jp2/.jpf`) into OCR'd, size-capped PDFs (`pdf` subcommand) and/or standalone JPEGs (`jpg` subcommand, or `pdf --jpg` for both). `README.md` documents user-facing behavior and options.
 
 ## Setup & running
 
@@ -28,8 +28,8 @@ Per-folder stages, each writing to a subdir of `<folder>/_work/`:
 1. `01_single_pages` (PDF) and `jpg` (JPEG) — `convert_all_images` runs `convert_image` per image in parallel (`CONVERT_JOBS` threads, each running ImageMagick limited to one thread via `-limit thread 1`); a failure cancels queued conversions. `convert_image` first runs `read_image_info` (ImageMagick `-ping ... -format ... info:`, header only, with `IMAGEMAGICK_INPUT_OPTS` so an uncommented `-density` applies), then `encode_jpeg` once per requested output with that output's `*_MAX_SIZE` and `*_QUALITY` (`pdf --jpg` runs ImageMagick twice per image). `encode_jpeg` reads only the first image of the file (`<path>[0]`; multi-image files are logged with a warning), converts to sRGB via `-profile SRGB_PROFILE` before `-resize`, and runs `strip_mismatched_icc`, which drops the sRGB profile that `-profile` attaches to untagged gray/CMYK images (wrong colors in img2pdf and viewers otherwise). `-profile` converts images with an embedded profile (e.g. Adobe RGB masters) to sRGB, tags untagged RGB as sRGB without changing pixels, and leaves untagged gray/CMYK alone; the profile survives OCRmyPDF to the final PDF. ImageMagick uses 4:2:0 chroma below quality 90. For PDF pages, img2pdf wraps the JPEG into a one-page PDF without re-encoding (`Rotation.none`: EXIF orientation is ignored). ImageMagick doesn't write the PDF itself: Ubuntu 22.04's default ImageMagick policy blocks the PDF coder, and its PDF writer adds a thumbnail and an opaque soft mask (for images with alpha) to every page. This JPEG encode is the only lossy step unless `OCR_OPTS` includes an option that re-encodes images (see below).
 2. `02_pre_ocr` (PDF) — `merge_pdfs` merges all pages into one PDF (single save). OCRmyPDF parallelizes across pages itself, so one run per folder keeps all cores busy.
 3. `03_ocr` (PDF) — `ocr_pdf` runs OCRmyPDF with `OCR_OPTS` plus `-l <ocr-lang>`. `--output-type pdf` gives a plain PDF rather than PDF/A. The `--optimize` level is a user-tunable size/quality trade-off: don't assume or document a specific value; read `OCR_OPTS` for the current one. `--no-ocr` adds `--tesseract-timeout 0`: no text layer, but OCRmyPDF still runs (and still rasterizes every page, so it saves only the Tesseract time). If OCRmyPDF fails it raises, failing the whole folder (no fallback).
-4. `04_split` (PDF) — if the OCR'd PDF is larger than `--max-mb`, `split_final_pdf_by_size` splits it into `-partNN` files; otherwise the OCR output is the final PDF.
-5. Only after every step succeeded, `move_outputs` moves the final PDFs into `<folder>/pdf/` and the JPEGs into `<folder>/jpg/` (overwriting same-named files, never deleting others). `_work` is deleted on success; it's preserved after unexpected failures (exceptions, Ctrl-C) but deleted after a `FolderError` (an expected problem with the folder's contents, logged as a plain message without a traceback). On failure, `<name>-part*.pdf` files in the pdf folder are removed. Failed folders are listed at the end of the run and `main()` returns exit code 1.
+4. `04_split` (PDF) — if the OCR'd PDF is larger than `--max-mb`, `split_pdf_by_size` splits it into `-partNN` files; otherwise the OCR output is the final PDF.
+5. Only after every step succeeded, `move_outputs` moves the final PDFs into `<folder>/pdf/` and the JPEGs into `<folder>/jpg/` (overwriting same-named files, never deleting others). `_work` is deleted on success; it's preserved after unexpected failures (exceptions, Ctrl-C) but deleted after a `FolderError` (an expected problem with the folder's contents, logged as a plain message without a traceback). On failure, `<name>-part*.pdf` files in the pdf folder are removed, including complete parts from earlier runs (an unsplit `<name>.pdf` is kept). Failed folders are listed at the end of the run and `main()` returns exit code 1.
 
 Implementation notes:
 - Splitting fills each part greedily (as many pages as fit under the cap; an oversized single page is kept as its own part, with a warning). To avoid a full save per page, `page_object_sizes` estimates each page's bytes (shared objects like the OCR font counted once per part), then real saves correct the estimate: drop pages while over the cap, add pages while still under. The result matches saving after every page; with accurate estimates that's ~2 saves per part. Keep it exact: the cap is user-facing.
@@ -94,7 +94,7 @@ Goal: a coworker who isn't a programmer runs the script on their Windows PC thro
      - double-click the icon and use the picker
      - drag a folder onto the icon
      - their largest TIFF
-     - a `.jp2` if they have any
+     - a `.jp2` or `.jpf` if they have any
      - a folder name with an umlaut, a space, `&` and parentheses
      - a folder big enough to split
      - `--no-ocr`

@@ -33,7 +33,7 @@ from PIL import Image
 # ============================================================
 
 # --- Input selection ---
-ALLOWED_EXT = {".tif", ".tiff", ".jpg", ".jpeg", ".jp2"}
+ALLOWED_EXT = {".tif", ".tiff", ".jpg", ".jpeg", ".jp2", ".jpf"}
 # Images whose filenames contain any of these words (case-insensitive) are skipped
 EXCLUDED_WORDS = {"ruler"}
 # Folder names that are too generic to name the output; use the parent's name instead
@@ -42,14 +42,13 @@ GENERIC_FOLDER_NAMES = {"master"}
 PDF_DIR_NAME = "pdf"
 JPG_DIR_NAME = "jpg"
 
-# --- ImageMagick (image -> JPEG; the only lossy step). For PDFs, img2pdf wraps the JPEG into a page ---
+# --- ImageMagick (encodes each image as a JPEG; for PDFs, img2pdf wraps it into a page without re-encoding) ---
 # "magick" on ImageMagick 7 (where "convert" is deprecated), "convert" on ImageMagick 6
 IMAGEMAGICK_CMD = "magick" if shutil.which("magick") else "convert"
-# Placed before the input file (read settings; -density must go here).
+# Read settings, placed before the input file.
 # "-limit thread 1" keeps each process single-threaded, since CONVERT_JOBS already runs one per core.
-# Real size is the original image's pixels / DPI, measured before resizing: PDF pages get that size, and
-# resized JPEGs get a DPI scaled to keep it. Uncomment the "-density" line to treat every image as 300 DPI
-# instead (real size = original pixels / 300); "-units" makes it apply to images whose DPI is in pixels/cm or missing.
+# Outputs keep the scanned object's real size (original pixels / DPI). Uncomment "-density" to treat every image
+# as 300 DPI instead; "-units" makes it also apply to images whose DPI is in pixels/cm or missing.
 IMAGEMAGICK_INPUT_OPTS = [
     "-limit", "thread", "1",
     # "-density", "300", "-units", "PixelsPerInch",
@@ -73,12 +72,11 @@ JPG_QUALITY = 90
 
 # --- OCRmyPDF (language is set by --ocr-lang) ---
 OCR_CMD = "ocrmypdf"
-# --optimize 2/3, PDF/A output and --deskew re-encode page images; --rotate-pages is lossless.
 OCR_OPTS = [
-    "--optimize", "3", # Select 3 for general use. Select 1 for higher quality (and larger file sizes).
-    #"--deskew", # Also re-encodes the JPEG
-    #"--rotate-pages", # Use for text
-    "--output-type", "pdf",
+    "--optimize", "3",  # Select 3 for general use, 1 for higher quality (and larger files). 2 and 3 re-encode page images.
+    #"--deskew",  # Re-encodes page images
+    #"--rotate-pages",  # Use for text; lossless (only sets page rotation)
+    "--output-type", "pdf",  # Plain PDF; the default (PDF/A) re-encodes page images
 ]
 
 # ============================================================
@@ -92,19 +90,19 @@ def setup_logging(log_file: Path) -> None:
     """Configure module-level logger for file + console output."""
     logger.setLevel(logging.INFO)
 
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.INFO)
-    fh.setFormatter(logging.Formatter(
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter(
         "%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     ))
 
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter("%(message)s"))
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
 
-    logger.addHandler(fh)
-    logger.addHandler(ch)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 
 
 # ============================================================
@@ -134,6 +132,66 @@ def validate_external_tools(need_ocrmypdf: bool) -> None:
         logger.error(f"sRGB profile not found: {SRGB_PROFILE}. Check SRGB_PROFILE.")
         raise FileNotFoundError(SRGB_PROFILE)
     logger.info(f"sRGB profile found: {SRGB_PROFILE}")
+
+
+# ============================================================
+# IMAGE SELECTION & NAMING
+# ============================================================
+
+def is_allowed_ext(path: Path) -> bool:
+    """True if path has an allowed image extension."""
+    return path.suffix.lower() in ALLOWED_EXT
+
+
+def is_excluded(path: Path) -> bool:
+    """True if the filename contains any word in EXCLUDED_WORDS."""
+    name = path.stem.lower()
+    return any(word in name for word in EXCLUDED_WORDS)
+
+
+def is_wanted_image(path: Path) -> bool:
+    """True if path has an allowed extension and no excluded word in its name."""
+    return is_allowed_ext(path) and not is_excluded(path)
+
+
+def natural_sort_key(path: Path) -> tuple:
+    """Sort key ordering filenames like Windows Explorer: numbers by value (2 before 10), case ignored.
+    The full name breaks ties between names that differ only in padding or case (p_1 vs p_01)."""
+    # re.split with a capture group alternates text and digit runs, so odd indexes are always digits
+    parts = re.split(r"(\d+)", path.name)
+    return ([int(t) if i % 2 else t.lower() for i, t in enumerate(parts)], path.name)
+
+
+def select_images(folder: Path) -> list[Path]:
+    """Return the folder's wanted images in natural order, logging excluded ones."""
+    candidates = [p for p in folder.iterdir() if is_allowed_ext(p)]
+    images = sorted((p for p in candidates if not is_excluded(p)), key=natural_sort_key)
+    skipped = sorted(p.name for p in candidates if is_excluded(p))
+    if skipped:
+        logger.info(f"  Skipped {len(skipped)} excluded image(s): {', '.join(skipped)}")
+    return images
+
+
+class FolderError(Exception):
+    """A problem with a folder's contents that fails the folder; logged as a plain message, without a traceback."""
+
+
+def jpg_name(image: Path) -> str:
+    """Output filename of an image's standalone JPEG."""
+    return f"{image.stem}.jpg"
+
+
+def check_jpg_name_clashes(images: list[Path]) -> None:
+    """Raise if two images would get the same JPEG name (e.g. a.tif and a.jpg), instead of one overwriting the other.
+    Compared case-insensitively, since Windows folders (/mnt/c in WSL) don't distinguish case."""
+    by_name: dict[str, list[str]] = {}
+    for image in images:
+        by_name.setdefault(jpg_name(image).lower(), []).append(image.name)
+    clashes = [names for names in by_name.values() if len(names) > 1]
+    if clashes:
+        raise FolderError(
+            "These images would get the same JPEG name: " + "; ".join(" and ".join(names) for names in clashes)
+        )
 
 
 # ============================================================
@@ -242,7 +300,7 @@ def convert_image(image_path: Path, page_pdf: Path | None, jpg_path: Path | None
         page_jpeg = page_pdf.with_suffix(".jpg")
         encode_jpeg(image_path, info, page_jpeg, PDF_MAX_SIZE, PDF_QUALITY, keep_real_size=False)
         page_size = page_size_points(info)
-        # Rotation.none ignores EXIF orientation, matching ImageMagick's PDF output
+        # Rotation.none: ignore EXIF orientation, so the page shows the pixels as stored
         page_pdf.write_bytes(img2pdf.convert(
             page_jpeg.read_bytes(),
             rotation=img2pdf.Rotation.none,
@@ -254,67 +312,11 @@ def convert_image(image_path: Path, page_pdf: Path | None, jpg_path: Path | None
         encode_jpeg(image_path, info, jpg_path, JPG_MAX_SIZE, JPG_QUALITY, keep_real_size=True)
 
 
-def is_allowed_ext(path: Path) -> bool:
-    """True if path has an allowed image extension."""
-    return path.suffix.lower() in ALLOWED_EXT
-
-
-def is_excluded(path: Path) -> bool:
-    """True if the filename contains any word in EXCLUDED_WORDS."""
-    name = path.stem.lower()
-    return any(word in name for word in EXCLUDED_WORDS)
-
-
-def is_wanted_image(path: Path) -> bool:
-    """True if path has an allowed extension and no excluded word in its name."""
-    return is_allowed_ext(path) and not is_excluded(path)
-
-
-def natural_sort_key(path: Path) -> tuple:
-    """Sort key ordering filenames like Windows Explorer: numbers by value (2 before 10), case ignored.
-    The full name breaks ties between names that differ only in padding or case (p_1 vs p_01)."""
-    # re.split with a capture group alternates text and digit runs, so odd indexes are always digits
-    parts = re.split(r"(\d+)", path.name)
-    return ([int(t) if i % 2 else t.lower() for i, t in enumerate(parts)], path.name)
-
-
-def select_images(folder: Path) -> list[Path]:
-    """Return the folder's wanted images in natural order, logging excluded ones."""
-    candidates = [p for p in folder.iterdir() if is_allowed_ext(p)]
-    images = sorted((p for p in candidates if not is_excluded(p)), key=natural_sort_key)
-    skipped = sorted(p.name for p in candidates if is_excluded(p))
-    if skipped:
-        logger.info(f"  Skipped {len(skipped)} excluded image(s): {', '.join(skipped)}")
-    return images
-
-
-class FolderError(Exception):
-    """A problem with a folder's contents that fails the folder; logged as a plain message, without a traceback."""
-
-
-def jpg_name(image: Path) -> str:
-    """Output filename of an image's standalone JPEG."""
-    return f"{image.stem}.jpg"
-
-
-def check_jpg_name_clashes(images: list[Path]) -> None:
-    """Raise if two images would get the same JPEG name (e.g. a.tif and a.jpg), instead of one overwriting the other.
-    Compared case-insensitively, since Windows folders (/mnt/c in WSL) don't distinguish case."""
-    by_name: dict[str, list[str]] = {}
-    for image in images:
-        by_name.setdefault(jpg_name(image).lower(), []).append(image.name)
-    clashes = [names for names in by_name.values() if len(names) > 1]
-    if clashes:
-        raise FolderError(
-            "These images would get the same JPEG name: " + "; ".join(" and ".join(names) for names in clashes)
-        )
-
-
 def convert_all_images(folder: Path, images: list[Path], single_pages_dir: Path | None,
                        jpg_dir: Path | None) -> list[Path]:
     """Convert images into single-page PDFs in single_pages_dir and/or JPEGs in jpg_dir (either may be None).
     Returns the page PDFs in page order (empty if single_pages_dir is None)."""
-    pdf_pages = [
+    page_pdfs = [
         single_pages_dir / f"{folder.name}_page{idx:06d}.pdf"
         for idx in range(len(images))
     ] if single_pages_dir else [None] * len(images)
@@ -322,8 +324,8 @@ def convert_all_images(folder: Path, images: list[Path], single_pages_dir: Path 
 
     with ThreadPoolExecutor(max_workers=CONVERT_JOBS) as executor:
         futures = [
-            executor.submit(convert_image, img, pdf_path, jpg_path)
-            for img, pdf_path, jpg_path in zip(images, pdf_pages, jpgs)
+            executor.submit(convert_image, img, page_pdf, jpg_path)
+            for img, page_pdf, jpg_path in zip(images, page_pdfs, jpgs)
         ]
         try:
             for future in futures:
@@ -335,7 +337,7 @@ def convert_all_images(folder: Path, images: list[Path], single_pages_dir: Path 
 
     outputs = [name for name, wanted in (("PDF pages", single_pages_dir), ("JPEGs", jpg_dir)) if wanted]
     logger.info(f"  Converted {len(images)} images to {' and '.join(outputs)}")
-    return pdf_pages if single_pages_dir else []
+    return page_pdfs if single_pages_dir else []
 
 
 # ============================================================
@@ -397,7 +399,7 @@ def save_page_range(src: pikepdf.Pdf, start: int, end: int, path: Path) -> float
     return pdf_size_mb(path)
 
 
-def split_final_pdf_by_size(input_pdf: Path, output_dir: Path, max_mb: int) -> list[Path]:
+def split_pdf_by_size(input_pdf: Path, output_dir: Path, max_mb: int) -> list[Path]:
     """
     Split a PDF into parts of at most max_mb, each holding as many pages as fit.
 
@@ -409,7 +411,7 @@ def split_final_pdf_by_size(input_pdf: Path, output_dir: Path, max_mb: int) -> l
 
     Output files are named "<stem>-part01.pdf", "<stem>-part02.pdf", etc.
     """
-    output_files: list[Path] = []
+    part_pdfs: list[Path] = []
     max_bytes = max_mb * 1_000_000
 
     with pikepdf.open(input_pdf) as src:
@@ -430,7 +432,7 @@ def split_final_pdf_by_size(input_pdf: Path, output_dir: Path, max_mb: int) -> l
                 estimate += sum(new.values())
                 end += 1
 
-            part_pdf = output_dir / f"{input_pdf.stem}-part{len(output_files) + 1:02d}.pdf"
+            part_pdf = output_dir / f"{input_pdf.stem}-part{len(part_pdfs) + 1:02d}.pdf"
             trial_pdf = part_pdf.with_suffix(".trial.pdf")
             size_mb = save_page_range(src, start, end, part_pdf)
 
@@ -455,10 +457,10 @@ def split_final_pdf_by_size(input_pdf: Path, output_dir: Path, max_mb: int) -> l
                     f"keeping it as an oversized part"
                 )
             logger.info(f"  Finalized {part_pdf.name} ({size_mb:.1f} MB, {end - start} pages)")
-            output_files.append(part_pdf)
+            part_pdfs.append(part_pdf)
             start = end
 
-    return output_files
+    return part_pdfs
 
 
 # ============================================================
@@ -502,7 +504,7 @@ def ocr_pdf(input_pdf: Path, output_pdf: Path, ocr_lang: str, no_ocr: bool = Fal
 
 
 # ============================================================
-# HELPERS
+# COMMAND LINE
 # ============================================================
 
 def parse_args(argv=None):
@@ -552,6 +554,10 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+# ============================================================
+# OUTPUT FILES
+# ============================================================
+
 def output_base_name(folder: Path) -> str:
     """Return the base name for a folder's final PDF(s)."""
     if folder.name.lower() in GENERIC_FOLDER_NAMES:
@@ -577,14 +583,15 @@ def move_outputs(files: list[Path], dest_dir: Path) -> None:
         file.rename(dest)
 
 
-def cleanup_partial_outputs(pdf_dir: Path, base_name: str) -> None:
-    """Remove partial split PDFs after a failure (in the pdf folder, if any)."""
+def remove_part_pdfs(pdf_dir: Path, base_name: str) -> None:
+    """After a failure, remove the folder's split PDFs (<base_name>-partNN.pdf) from pdf_dir, including those
+    from earlier runs, so no mixed set of parts is left."""
     for pdf in pdf_dir.glob(f"{base_name}-part*.pdf"):
         try:
             pdf.unlink()
-            logger.info(f"  Removed partial output: {pdf.name}")
+            logger.info(f"  Removed split PDF: {pdf.name}")
         except Exception:
-            logger.exception(f"  Failed to remove partial output: {pdf.name}")
+            logger.exception(f"  Failed to remove split PDF: {pdf.name}")
 
 
 # ============================================================
@@ -619,22 +626,18 @@ def main(argv=None) -> int:
         # Skip folders starting with "_" (work and log folders) and the script's own output folders
         dirs[:] = [d for d in dirs if not d.startswith("_") and not is_output_dir(d)]
 
-        # Skip folders with no files
-        if not files:
-            continue
-
-        # Skip folders with no images
+        # Skip folders without images
         if not any(is_wanted_image(Path(f)) for f in files):
             continue
 
-        root_path = Path(root)
-        base_name = output_base_name(root_path)
-        pdf_dir = root_path / PDF_DIR_NAME
+        folder = Path(root)
+        base_name = output_base_name(folder)
+        pdf_dir = folder / PDF_DIR_NAME
 
-        logger.info(f"\nProcessing folder: {root_path}")
+        logger.info(f"\nProcessing folder: {folder}")
 
         # Per-folder work folder structure
-        work_dir         = root_path / "_work"
+        work_dir         = folder / "_work"
         single_pages_dir = work_dir / "01_single_pages"
         pre_ocr_dir      = work_dir / "02_pre_ocr"
         ocr_dir          = work_dir / "03_ocr"
@@ -651,9 +654,9 @@ def main(argv=None) -> int:
         keep_work = False  # Kept for debugging after unexpected failures
 
         try:
-            images = select_images(root_path)
+            images = select_images(folder)
             if not images:
-                # Nothing to convert; leave work_dir empty for this folder
+                # Only if the images vanished since the walk listed them
                 logger.warning("  No valid images found.")
                 continue
             logger.info(f"  Found {len(images)} images")
@@ -662,7 +665,7 @@ def main(argv=None) -> int:
 
             # 1. Convert images -> single-page PDFs (in _work/01_single_pages) and/or JPEGs (in _work/jpg)
             page_pdfs = convert_all_images(
-                root_path,
+                folder,
                 images,
                 single_pages_dir if make_pdf else None,
                 jpg_work_dir if make_jpg else None,
@@ -678,17 +681,17 @@ def main(argv=None) -> int:
                 ocr_pdf(pre_ocr_pdf, ocr_output, args.ocr_lang, args.no_ocr)
 
                 # 4. Split into parts in _work/04_split if over --max-mb
-                final_size = pdf_size_mb(ocr_output)
+                ocr_size_mb = pdf_size_mb(ocr_output)
 
-                if final_size > args.max_mb:
+                if ocr_size_mb > args.max_mb:
                     logger.info(
-                        f"  PDF {ocr_output.name} is {final_size:.1f} MB "
+                        f"  PDF {ocr_output.name} is {ocr_size_mb:.1f} MB "
                         f"(>{args.max_mb} MB); splitting..."
                     )
-                    final_pdfs = split_final_pdf_by_size(ocr_output, split_dir, args.max_mb)
+                    final_pdfs = split_pdf_by_size(ocr_output, split_dir, args.max_mb)
                 else:
                     logger.info(
-                        f"  PDF {ocr_output.name} is {final_size:.1f} MB "
+                        f"  PDF {ocr_output.name} is {ocr_size_mb:.1f} MB "
                         f"(<= {args.max_mb} MB); no splitting needed."
                     )
                     final_pdfs = [ocr_output]
@@ -699,7 +702,7 @@ def main(argv=None) -> int:
                 for pdf in final_pdfs:
                     logger.info(f"  Final output written: {pdf_dir / pdf.name}")
             if make_jpg:
-                jpg_dir = root_path / JPG_DIR_NAME
+                jpg_dir = folder / JPG_DIR_NAME
                 move_outputs(sorted(jpg_work_dir.iterdir()), jpg_dir)
                 logger.info(f"  {len(images)} JPEGs written to: {jpg_dir}")
 
@@ -711,14 +714,14 @@ def main(argv=None) -> int:
         except Exception as e:
             folder_success = False
             if isinstance(e, FolderError):
-                logger.error(f"Folder failed: {root_path}\n  {e}")
+                logger.error(f"Folder failed: {folder}\n  {e}")
             else:
                 keep_work = True
-                logger.exception(f"Folder failed: {root_path}; leaving _work for debugging.")
-            failed_folders.append(root_path)
-            # Clean up any partial split PDFs matching the folder base name
+                logger.exception(f"Folder failed: {folder}; leaving _work for debugging.")
+            failed_folders.append(folder)
+            # Remove split PDFs from the pdf folder, including those of earlier runs
             if make_pdf:
-                cleanup_partial_outputs(pdf_dir, base_name)
+                remove_part_pdfs(pdf_dir, base_name)
             continue
         finally:
             # 6. Clean up work directory, unless kept for debugging after a failure

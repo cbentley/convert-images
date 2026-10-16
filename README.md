@@ -48,7 +48,7 @@ python convert_images.py jpg /path/to/images
 
 ## What it does
 
-The script searches `<folder>` and all its subfolders. Every folder that directly contains images (`.tif`, `.tiff`, `.jpg`, `.jpeg`, `.jp2`) is converted on its own; images are never combined across folders. Pages are sorted by filename in natural order, like Windows Explorer: numbers by value (`page2` before `page10`), ignoring case.
+The script searches `<folder>` and all its subfolders. Every folder that directly contains images (`.tif`, `.tiff`, `.jpg`, `.jpeg`, `.jp2`, `.jpf`) is converted on its own; images are never combined across folders. Pages are sorted by filename in natural order, like Windows Explorer: numbers by value (`page2` before `page10`), ignoring case.
 
 Skipped:
 - folders whose names start with `_`, and folders named `pdf` or `jpg` (the script's own output folders)
