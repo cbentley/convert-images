@@ -56,7 +56,7 @@ Each image folder is processed in its own `_work` directory:
 
 | Step             | Work directory          | What happens                                                                                                                                                                             |
 | ---------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Convert       | `_work/01_single_pages` | ImageMagick turns each image into a JPEG, and img2pdf wraps it into a one-page PDF without re-encoding. Colors are converted to sRGB. By default, images over 3500 px on the long side are scaled down to 3500 px, and pages are stored as JPEG quality 75.                  |
+| 1. Convert       | `_work/01_single_pages` | ImageMagick turns each image into a JPEG, and img2pdf wraps it into a one-page PDF without re-encoding. Colors are converted to sRGB, and each page keeps the scanned object's real size. Image size and JPEG quality are set in `IMAGEMAGICK_OUTPUT_OPTS`; an optional `-resize` cap scales large images down.                  |
 | 2. Merge         | `_work/02_pre_ocr`      | All pages are merged into one PDF.                                                                                                                                                       |
 | 3. OCR           | `_work/03_ocr`          | OCRmyPDF adds a searchable text layer. Depending on `OCR_OPTS`, it may also re-compress the page images (see Configuration).                                                             |
 | 4. Split         | `_work/04_split`        | If the PDF exceeds `--max-mb`, it is split into parts, each holding as many pages as fit.                                                                                                |
@@ -75,8 +75,9 @@ Other settings are constants at the top of `image_to_pdf.py`:
 | `ALLOWED_EXT`             | Image file extensions to process                                      |
 | `EXCLUDED_WORDS`          | Filename words that cause an image to be skipped                      |
 | `GENERIC_FOLDER_NAMES`    | Folder names that take their output name from the parent folder       |
-| `IMAGEMAGICK_CMD`         | ImageMagick command: `convert` for version 6, `magick` for version 7  |
-| `IMAGEMAGICK_INPUT_OPTS`  | ImageMagick options before the input file (e.g. `-density`)           |
+| `IMAGEMAGICK_CMD`         | ImageMagick command (default: `magick` if installed, i.e. version 7, else `convert`) |
+| `IMAGEMAGICK_INPUT_OPTS`  | ImageMagick options before the input file (e.g. `-density`, commented out so pages keep each scan's real size) |
+| `FALLBACK_DPI`            | DPI assumed for images that don't store one (sets their page size)   |
 | `SRGB_PROFILE`            | Path to the sRGB ICC profile pages are converted to                   |
 | `IMAGEMAGICK_OUTPUT_OPTS` | ImageMagick options after the input file (sRGB conversion, resize limit, JPEG quality) |
 | `CONVERT_JOBS`            | Images converted in parallel (default: CPU count; lower if memory runs out) |

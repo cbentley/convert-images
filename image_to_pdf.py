@@ -38,10 +38,19 @@ EXCLUDED_WORDS = {"ruler"}
 GENERIC_FOLDER_NAMES = {"master"}
 
 # --- ImageMagick (image -> JPEG; the only lossy step), then img2pdf wraps the JPEG into a one-page PDF ---
-IMAGEMAGICK_CMD = "convert" # Set to "magick" for ImageMagick versions > 6
+# "magick" on ImageMagick 7 (where "convert" is deprecated), "convert" on ImageMagick 6
+IMAGEMAGICK_CMD = "magick" if shutil.which("magick") else "convert"
 # Placed before the input file (read settings; -density must go here).
 # "-limit thread 1" keeps each process single-threaded, since CONVERT_JOBS already runs one per core.
-IMAGEMAGICK_INPUT_OPTS = ["-limit", "thread", "1", "-density", "300"]
+# PDF page size is the original image's pixels / DPI, measured before -resize, so pages keep the scanned
+# object's real size. Uncomment the "-density" line to treat every image as 300 DPI instead (page size =
+# original pixels / 300); "-units" makes it apply to images whose DPI is in pixels/cm or missing.
+IMAGEMAGICK_INPUT_OPTS = [
+    "-limit", "thread", "1",
+    # "-density", "300", "-units", "PixelsPerInch",
+]
+# DPI assumed for images that don't store one, when -density is not set
+FALLBACK_DPI = 300
 # sRGB ICC profile. Images with an embedded profile (e.g. Adobe RGB) are converted to sRGB;
 # untagged RGB images are tagged as sRGB without changing pixels; untagged gray/CMYK are left as is.
 # Ubuntu: from the icc-profiles-free package. macOS: "/System/Library/ColorSync/Profiles/sRGB Profile.icc"
@@ -49,9 +58,8 @@ SRGB_PROFILE = "/usr/share/color/icc/sRGB.icc"
 # Placed after the input file (processing and output encoding)
 IMAGEMAGICK_OUTPUT_OPTS = [
     "-profile", SRGB_PROFILE, # Before -resize, so pixels are converted before resizing and encoding
-    "-resize", "3500x3500>",
+    #"-resize", "3500x3500>",
     "-quality", "75",
-    "-units", "PixelsPerInch", # Store the density in the JPEG, so img2pdf sizes the page from -density
 ]
 # Number of images converted in parallel. Lower it if large TIFFs exhaust memory.
 CONVERT_JOBS = os.cpu_count() or 1
@@ -152,6 +160,18 @@ def strip_mismatched_icc(jpeg: bytes) -> bytes:
     return bytes(out)
 
 
+def original_page_size(print_output: str) -> tuple[float, float]:
+    """Page size in points from ImageMagick's "-print '%w %h %x %y %U'" line for the original image.
+    ImageMagick reports 72 DPI with units "Undefined" when the file stores no DPI; FALLBACK_DPI is used then."""
+    width, height, x_dpi, y_dpi, units = print_output.split("\n")[0].split()
+    x_dpi, y_dpi = float(x_dpi), float(y_dpi)
+    if units == "PixelsPerCentimeter":
+        x_dpi, y_dpi = x_dpi * 2.54, y_dpi * 2.54
+    elif units != "PixelsPerInch" or x_dpi <= 0 or y_dpi <= 0:
+        x_dpi = y_dpi = FALLBACK_DPI
+    return int(width) / x_dpi * 72, int(height) / y_dpi * 72
+
+
 def convert_image_to_pdf(image_path: Path, output_pdf: Path) -> None:
     """Convert a single image into a 1-page PDF: ImageMagick encodes a JPEG, img2pdf wraps it without re-encoding.
     (ImageMagick's own PDF writer is blocked by the default security policy on Ubuntu 22.04, and adds a thumbnail
@@ -161,13 +181,19 @@ def convert_image_to_pdf(image_path: Path, output_pdf: Path) -> None:
         IMAGEMAGICK_CMD,
         *IMAGEMAGICK_INPUT_OPTS,
         str(image_path),
+        "-print", "%w %h %x %y %U\n",  # Original size and DPI, before -resize changes the pixel count
         *IMAGEMAGICK_OUTPUT_OPTS,
         str(jpeg_path)
     ]
-    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    page_size = original_page_size(result.stdout)
     jpeg = strip_mismatched_icc(jpeg_path.read_bytes())
     # Rotation.none ignores EXIF orientation, matching ImageMagick's PDF output
-    output_pdf.write_bytes(img2pdf.convert(jpeg, rotation=img2pdf.Rotation.none))
+    output_pdf.write_bytes(img2pdf.convert(
+        jpeg,
+        rotation=img2pdf.Rotation.none,
+        layout_fun=lambda *_: (*page_size, *page_size),  # Image fills a page of the original's size
+    ))
     jpeg_path.unlink()
 
 
