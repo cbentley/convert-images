@@ -4,11 +4,11 @@ Converts folders of scanned images into searchable, size-limited PDFs and/or JPE
 
 ## Setup
 
-Requires ImageMagick, an sRGB ICC profile (see `SRGB_PROFILE`) and, for PDFs, OCRmyPDF (with Ghostscript and Tesseract language packs):
+Requires ImageMagick, an sRGB ICC profile (see `SRGB_PROFILE`) and, for PDFs, OCRmyPDF (with Ghostscript, Tesseract language packs and `pngquant`, which `--optimize 2` and `3` need):
 
 ```bash
 # Ubuntu
-sudo apt update && sudo apt install -y imagemagick ocrmypdf tesseract-ocr-all icc-profiles-free
+sudo apt update && sudo apt install -y imagemagick ocrmypdf pngquant tesseract-ocr-all icc-profiles-free
 
 # macOS
 brew install imagemagick ghostscript ocrmypdf tesseract-lang
@@ -76,7 +76,9 @@ Each image folder is processed in its own `_work` directory:
 
 ### Errors
 
-If any step fails for a folder, including OCR (there is no non-OCR fallback), that folder gets no new output, its `_work` directory is kept for debugging, and the script moves on to the next folder. Failed folders are listed at the end, and the exit status is `1` (`0` if all succeeded).
+If any step fails for a folder, including OCR (there is no non-OCR fallback), that folder gets no new output and the script moves on to the next folder. Split PDFs (`-partNN`) already in its `pdf` folder are removed, including complete ones from earlier runs, so no mix of old and new parts is left. Its `_work` directory is kept for debugging, except when the failure is a problem with the folder's contents that the log explains (such as a JPEG name clash). Failed folders are listed at the end.
+
+Exit status: `0` if all folders succeeded, `1` if any failed, `2` for invalid options or a folder that doesn't exist.
 
 ## Configuration
 

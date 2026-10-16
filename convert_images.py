@@ -10,15 +10,16 @@ See README.md for full documentation.
 """
 
 
-import os
-import re
-import shutil
 import argparse
 import datetime
 import io
 import logging
+import os
+import re
+import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
@@ -85,9 +86,15 @@ OCR_OPTS = [
 
 logger = logging.getLogger("convert_images")
 
+# Inside the input folder; starts with "_" so it's never searched for images
+LOGS_DIR_NAME = "_logs"
 
-def setup_logging(log_file: Path) -> None:
-    """Configure module-level logger for file + console output."""
+
+def setup_logging(input_folder: Path) -> Path:
+    """Log to the console and to a new timestamped file in input_folder/_logs; return the log file's path."""
+    logs_dir = input_folder / LOGS_DIR_NAME
+    logs_dir.mkdir(exist_ok=True)
+    log_file = logs_dir / f"{datetime.datetime.now():%Y%m%d_%H%M%S}_log.txt"
     logger.setLevel(logging.INFO)
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
@@ -103,6 +110,7 @@ def setup_logging(log_file: Path) -> None:
 
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
+    return log_file
 
 
 # ============================================================
@@ -312,14 +320,15 @@ def convert_image(image_path: Path, page_pdf: Path | None, jpg_path: Path | None
         encode_jpeg(image_path, info, jpg_path, JPG_MAX_SIZE, JPG_QUALITY, keep_real_size=True)
 
 
-def convert_all_images(folder: Path, images: list[Path], single_pages_dir: Path | None,
-                       jpg_dir: Path | None) -> list[Path]:
-    """Convert images into single-page PDFs in single_pages_dir and/or JPEGs in jpg_dir (either may be None).
-    Returns the page PDFs in page order (empty if single_pages_dir is None)."""
-    page_pdfs = [
-        single_pages_dir / f"{folder.name}_page{idx:06d}.pdf"
-        for idx in range(len(images))
-    ] if single_pages_dir else [None] * len(images)
+def convert_all_images(images: list[Path], single_pages_dir: Path | None, jpg_dir: Path | None) -> list[Path]:
+    """Convert images into single-page PDFs in single_pages_dir and/or JPEGs in jpg_dir (either may be None;
+    both are created). Returns the page PDFs in page order (empty if single_pages_dir is None)."""
+    for d in (single_pages_dir, jpg_dir):
+        if d:
+            d.mkdir(parents=True, exist_ok=True)
+    # Zero-padded so the pages also sort correctly by name
+    page_pdfs = [single_pages_dir / f"page{idx:06d}.pdf" for idx in range(len(images))] \
+        if single_pages_dir else [None] * len(images)
     jpgs = [jpg_dir / jpg_name(img) for img in images] if jpg_dir else [None] * len(images)
 
     with ThreadPoolExecutor(max_workers=CONVERT_JOBS) as executor:
@@ -341,11 +350,11 @@ def convert_all_images(folder: Path, images: list[Path], single_pages_dir: Path 
 
 
 # ============================================================
-# MERGE (PRE-OCR) & SPLIT (POST-OCR)
+# PDF: MERGE (PRE-OCR), OCR, SPLIT (POST-OCR)
 # ============================================================
 
-def pdf_size_mb(path: Path) -> float:
-    """Return the size of the PDF in megabytes."""
+def size_mb(path: Path) -> float:
+    """Return the size of a file in megabytes."""
     return path.stat().st_size / 1_000_000
 
 
@@ -359,6 +368,42 @@ def merge_pdfs(pdf_files: list[Path], output_pdf: Path) -> Path:
 
     logger.info(f"  Merged {len(pdf_files)} PDFs into {output_pdf.name}")
     return output_pdf
+
+
+def ocr_pdf(input_pdf: Path, output_pdf: Path, ocr_lang: str, no_ocr: bool = False) -> None:
+    """
+    Run OCRmyPDF on a PDF, writing the result to output_pdf.
+
+    With no_ocr, text recognition is skipped ("--tesseract-timeout 0") but the
+    rest of OCR_OPTS (e.g. --optimize) still applies.
+    Raises RuntimeError if OCRmyPDF fails (there is no fallback).
+    """
+    cmd = [
+        OCR_CMD,
+        *OCR_OPTS,
+        *(["--tesseract-timeout", "0"] if no_ocr else []),
+        "-l", ocr_lang,
+        str(input_pdf),
+        str(output_pdf),
+    ]
+
+    action = "Optimizing (no OCR)" if no_ocr else "OCRing"
+    logger.info(f"  {action} {input_pdf.name} -> {output_pdf.name}...")
+
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        logger.error(f"OCRmyPDF error output for {input_pdf.name}:\n{result.stderr}")
+        raise RuntimeError(
+            f"OCR failed for {input_pdf.name} (OCRmyPDF exit code {result.returncode})"
+        )
+
+    logger.info(f"  Finished {'optimizing' if no_ocr else 'OCR'}: {output_pdf.name}")
 
 
 def page_object_sizes(page: pikepdf.Page) -> dict[tuple[int, int], int]:
@@ -396,7 +441,7 @@ def save_page_range(src: pikepdf.Pdf, start: int, end: int, path: Path) -> float
     with pikepdf.Pdf.new() as pdf:
         pdf.pages.extend(src.pages[start:end])
         pdf.save(path)
-    return pdf_size_mb(path)
+    return size_mb(path)
 
 
 def split_pdf_by_size(input_pdf: Path, output_dir: Path, max_mb: int) -> list[Path]:
@@ -464,50 +509,11 @@ def split_pdf_by_size(input_pdf: Path, output_dir: Path, max_mb: int) -> list[Pa
 
 
 # ============================================================
-# OCR
-# ============================================================
-
-def ocr_pdf(input_pdf: Path, output_pdf: Path, ocr_lang: str, no_ocr: bool = False) -> None:
-    """
-    Run OCRmyPDF on a PDF, writing the result to output_pdf.
-
-    With no_ocr, text recognition is skipped ("--tesseract-timeout 0") but the
-    rest of OCR_OPTS (e.g. --optimize) still applies.
-    Raises RuntimeError if OCRmyPDF fails (there is no fallback).
-    """
-    cmd = [
-        OCR_CMD,
-        *OCR_OPTS,
-        *(["--tesseract-timeout", "0"] if no_ocr else []),
-        "-l", ocr_lang,
-        str(input_pdf),
-        str(output_pdf),
-    ]
-
-    action = "Optimizing (no OCR)" if no_ocr else "OCRing"
-    logger.info(f"  {action} {input_pdf.name} -> {output_pdf.name}...")
-
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-
-    if result.returncode != 0:
-        logger.error(f"OCRmyPDF error output for {input_pdf.name}:\n{result.stderr}")
-        raise RuntimeError(
-            f"OCR failed for {input_pdf.name} (OCRmyPDF exit code {result.returncode})"
-        )
-
-    logger.info(f"  Finished {'optimizing' if no_ocr else 'OCR'}: {output_pdf.name}")
-
-
-# ============================================================
 # COMMAND LINE
 # ============================================================
 
-def parse_args(argv=None):
+def parse_args(argv=None) -> argparse.Namespace:
+    """Parse the command line. Sets make_pdf and make_jpg for either subcommand; exits if the folder doesn't exist."""
     parser = argparse.ArgumentParser(
         description="Convert folders of scanned images to OCR'd PDFs and/or JPEGs."
     )
@@ -537,6 +543,7 @@ def parse_args(argv=None):
     )
     pdf_parser.add_argument(
         "--jpg",
+        dest="make_jpg",
         action="store_true",
         help="Also save each image as a JPEG in a jpg folder inside its image folder."
     )
@@ -549,9 +556,12 @@ def parse_args(argv=None):
         description="Save each image as a JPEG, written to a jpg folder inside its image folder.",
     )
     jpg_parser.add_argument("folder")
-    jpg_parser.set_defaults(make_pdf=False, jpg=True)
+    jpg_parser.set_defaults(make_pdf=False, make_jpg=True)
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not Path(args.folder).is_dir():
+        parser.error(f"folder not found: {args.folder}")
+    return args
 
 
 # ============================================================
@@ -574,13 +584,7 @@ def move_outputs(files: list[Path], dest_dir: Path) -> None:
     """Move finished files from _work into dest_dir, replacing files with the same name."""
     dest_dir.mkdir(exist_ok=True)
     for file in files:
-        dest = dest_dir / file.name
-        if dest.exists():
-            try:
-                dest.unlink()
-            except Exception:
-                logger.exception(f"  Failed to remove existing file before overwrite: {dest}")
-        file.rename(dest)
+        file.replace(dest_dir / file.name)
 
 
 def remove_part_pdfs(pdf_dir: Path, base_name: str) -> None:
@@ -595,149 +599,136 @@ def remove_part_pdfs(pdf_dir: Path, base_name: str) -> None:
 
 
 # ============================================================
+# FOLDER PROCESSING
+# ============================================================
+
+# Inside each image folder; starts with "_" so it's never searched for images
+WORK_DIR_NAME = "_work"
+
+
+def find_image_folders(input_folder: Path) -> Iterator[Path]:
+    """Yield input_folder and every folder below it that directly contains wanted images.
+    Folders starting with "_" (work and log folders) and the output folders are skipped, with their subfolders."""
+    for root, dirs, files in os.walk(input_folder):
+        dirs[:] = [d for d in dirs if not d.startswith("_") and not is_output_dir(d)]
+        if any(is_wanted_image(Path(f)) for f in files):
+            yield Path(root)
+
+
+def make_final_pdfs(page_pdfs: list[Path], work_dir: Path, base_name: str, args: argparse.Namespace) -> list[Path]:
+    """Merge the page PDFs, OCR the result and split it if it's over --max-mb (steps 2-4).
+    Returns the final PDFs, still in work_dir."""
+    pre_ocr_dir = work_dir / "02_pre_ocr"
+    ocr_dir = work_dir / "03_ocr"
+    split_dir = work_dir / "04_split"
+    for d in (pre_ocr_dir, ocr_dir, split_dir):
+        d.mkdir(exist_ok=True)
+
+    # 2. Merge all pages into one PDF, so a single OCRmyPDF run can use every core
+    pre_ocr_pdf = merge_pdfs(page_pdfs, pre_ocr_dir / f"{base_name}.pdf")
+
+    # 3. OCR (with --no-ocr, only the rest of OCR_OPTS applies)
+    ocr_output = ocr_dir / f"{base_name}.pdf"
+    ocr_pdf(pre_ocr_pdf, ocr_output, args.ocr_lang, args.no_ocr)
+
+    # 4. Split if over --max-mb
+    ocr_size_mb = size_mb(ocr_output)
+    if ocr_size_mb <= args.max_mb:
+        logger.info(f"  PDF {ocr_output.name} is {ocr_size_mb:.1f} MB (<= {args.max_mb} MB); no splitting needed.")
+        return [ocr_output]
+    logger.info(f"  PDF {ocr_output.name} is {ocr_size_mb:.1f} MB (>{args.max_mb} MB); splitting...")
+    return split_pdf_by_size(ocr_output, split_dir, args.max_mb)
+
+
+def convert_folder(folder: Path, args: argparse.Namespace) -> None:
+    """Convert one image folder's images into its pdf and/or jpg folder. Intermediate files go to folder/_work;
+    outputs are moved out only after every step succeeded. Raises on failure."""
+    images = select_images(folder)
+    if not images:
+        # Only if the images vanished since find_image_folders listed them
+        logger.warning("  No valid images found.")
+        return
+    logger.info(f"  Found {len(images)} images")
+    if args.make_jpg:
+        check_jpg_name_clashes(images)
+
+    # 1. Convert each image into a single-page PDF and/or a JPEG
+    work_dir = folder / WORK_DIR_NAME
+    jpg_work_dir = work_dir / "jpg"
+    page_pdfs = convert_all_images(
+        images,
+        work_dir / "01_single_pages" if args.make_pdf else None,
+        jpg_work_dir if args.make_jpg else None,
+    )
+
+    # 2-4. Merge, OCR and split
+    base_name = output_base_name(folder)
+    final_pdfs = make_final_pdfs(page_pdfs, work_dir, base_name, args) if args.make_pdf else []
+
+    # 5. Move the outputs into the pdf and jpg folders
+    if args.make_pdf:
+        pdf_dir = folder / PDF_DIR_NAME
+        move_outputs(final_pdfs, pdf_dir)
+        for pdf in final_pdfs:
+            logger.info(f"  Final output written: {pdf_dir / pdf.name}")
+    if args.make_jpg:
+        jpg_dir = folder / JPG_DIR_NAME
+        move_outputs(sorted(jpg_work_dir.iterdir()), jpg_dir)
+        logger.info(f"  {len(images)} JPEGs written to: {jpg_dir}")
+
+
+def process_folder(folder: Path, args: argparse.Namespace) -> bool:
+    """Run convert_folder, log any failure and clean up. Returns True if the folder succeeded.
+
+    _work is deleted, except after unexpected failures and Ctrl-C, where it's kept for debugging. A FolderError
+    is an expected problem with the folder's contents, logged without a traceback. Ctrl-C stops the whole run."""
+    logger.info(f"\nProcessing folder: {folder}")
+    work_dir = folder / WORK_DIR_NAME
+    success = False
+    keep_work = False
+    try:
+        convert_folder(folder, args)
+        success = True
+    except KeyboardInterrupt:
+        keep_work = True
+        logger.error("Interrupted by user (Ctrl-C); leaving _work for debugging.")
+        raise
+    except FolderError as e:
+        logger.error(f"Folder failed: {folder}\n  {e}")
+    except Exception:
+        keep_work = True
+        logger.exception(f"Folder failed: {folder}; leaving _work for debugging.")
+    finally:
+        if keep_work:
+            logger.info(f"  Preserving work directory for debugging: {work_dir}")
+        elif work_dir.exists():
+            try:
+                shutil.rmtree(work_dir)
+                if success:
+                    logger.info(f"  Cleaned up work directory: {work_dir}")
+            except Exception:
+                logger.exception(f"  Failed to remove work directory: {work_dir}")
+
+    if not success and args.make_pdf:
+        remove_part_pdfs(folder / PDF_DIR_NAME, output_base_name(folder))
+    return success
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 def main(argv=None) -> int:
-    """
-    Convert every image folder to a PDF (image→PDF→OCR pipeline) and/or JPEGs, with temp work directories.
-    Returns the process exit code: 0 if all folders succeeded, 1 otherwise.
-    """
+    """Convert every image folder under the input folder. Returns the exit code: 0 if all folders succeeded, else 1."""
     args = parse_args(argv)
-    make_pdf, make_jpg = args.make_pdf, args.jpg
-
     input_folder = Path(args.folder).resolve()
 
-    # Log
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    logs_dir = input_folder / "_logs"
-    logs_dir.mkdir(exist_ok=True)
-    log_file = logs_dir / f"{timestamp}_log.txt"
-    setup_logging(log_file)
-    outputs = " and ".join(name for name, wanted in (("PDFs", make_pdf), ("JPEGs", make_jpg)) if wanted)
+    log_file = setup_logging(input_folder)
+    outputs = " and ".join(name for name, wanted in (("PDFs", args.make_pdf), ("JPEGs", args.make_jpg)) if wanted)
     logger.info(f"Converting images to {outputs} in {input_folder}")
+    validate_external_tools(need_ocrmypdf=args.make_pdf)
 
-    validate_external_tools(need_ocrmypdf=make_pdf)
-
-    failed_folders: list[Path] = []
-
-    # Folder processing
-    for root, dirs, files in os.walk(input_folder):
-        # Skip folders starting with "_" (work and log folders) and the script's own output folders
-        dirs[:] = [d for d in dirs if not d.startswith("_") and not is_output_dir(d)]
-
-        # Skip folders without images
-        if not any(is_wanted_image(Path(f)) for f in files):
-            continue
-
-        folder = Path(root)
-        base_name = output_base_name(folder)
-        pdf_dir = folder / PDF_DIR_NAME
-
-        logger.info(f"\nProcessing folder: {folder}")
-
-        # Per-folder work folder structure
-        work_dir         = folder / "_work"
-        single_pages_dir = work_dir / "01_single_pages"
-        pre_ocr_dir      = work_dir / "02_pre_ocr"
-        ocr_dir          = work_dir / "03_ocr"
-        split_dir        = work_dir / "04_split"
-        jpg_work_dir     = work_dir / "jpg"
-
-        # Ensure work subfolders exist
-        for d in [single_pages_dir, pre_ocr_dir, ocr_dir, split_dir] if make_pdf else []:
-            d.mkdir(parents=True, exist_ok=True)
-        if make_jpg:
-            jpg_work_dir.mkdir(parents=True, exist_ok=True)
-
-        folder_success = True
-        keep_work = False  # Kept for debugging after unexpected failures
-
-        try:
-            images = select_images(folder)
-            if not images:
-                # Only if the images vanished since the walk listed them
-                logger.warning("  No valid images found.")
-                continue
-            logger.info(f"  Found {len(images)} images")
-            if make_jpg:
-                check_jpg_name_clashes(images)
-
-            # 1. Convert images -> single-page PDFs (in _work/01_single_pages) and/or JPEGs (in _work/jpg)
-            page_pdfs = convert_all_images(
-                folder,
-                images,
-                single_pages_dir if make_pdf else None,
-                jpg_work_dir if make_jpg else None,
-            )
-
-            final_pdfs: list[Path] = []
-            if make_pdf:
-                # 2. Pre-OCR merge: all pages into one PDF in _work/02_pre_ocr
-                pre_ocr_pdf = merge_pdfs(page_pdfs, pre_ocr_dir / f"{base_name}.pdf")
-
-                # 3. OCR the merged PDF into _work/03_ocr (with --no-ocr, OCR_OPTS only)
-                ocr_output = ocr_dir / f"{base_name}.pdf"
-                ocr_pdf(pre_ocr_pdf, ocr_output, args.ocr_lang, args.no_ocr)
-
-                # 4. Split into parts in _work/04_split if over --max-mb
-                ocr_size_mb = pdf_size_mb(ocr_output)
-
-                if ocr_size_mb > args.max_mb:
-                    logger.info(
-                        f"  PDF {ocr_output.name} is {ocr_size_mb:.1f} MB "
-                        f"(>{args.max_mb} MB); splitting..."
-                    )
-                    final_pdfs = split_pdf_by_size(ocr_output, split_dir, args.max_mb)
-                else:
-                    logger.info(
-                        f"  PDF {ocr_output.name} is {ocr_size_mb:.1f} MB "
-                        f"(<= {args.max_mb} MB); no splitting needed."
-                    )
-                    final_pdfs = [ocr_output]
-
-            # 5. Move outputs from _work into the pdf and jpg folders, overwriting if needed
-            if make_pdf:
-                move_outputs(final_pdfs, pdf_dir)
-                for pdf in final_pdfs:
-                    logger.info(f"  Final output written: {pdf_dir / pdf.name}")
-            if make_jpg:
-                jpg_dir = folder / JPG_DIR_NAME
-                move_outputs(sorted(jpg_work_dir.iterdir()), jpg_dir)
-                logger.info(f"  {len(images)} JPEGs written to: {jpg_dir}")
-
-        except KeyboardInterrupt:
-            folder_success = False
-            keep_work = True
-            logger.error("Interrupted by user (Ctrl-C); leaving _work for debugging.")
-            raise   # re-raise so the whole script stops immediately
-        except Exception as e:
-            folder_success = False
-            if isinstance(e, FolderError):
-                logger.error(f"Folder failed: {folder}\n  {e}")
-            else:
-                keep_work = True
-                logger.exception(f"Folder failed: {folder}; leaving _work for debugging.")
-            failed_folders.append(folder)
-            # Remove split PDFs from the pdf folder, including those of earlier runs
-            if make_pdf:
-                remove_part_pdfs(pdf_dir, base_name)
-            continue
-        finally:
-            # 6. Clean up work directory, unless kept for debugging after a failure
-            if not keep_work:
-                try:
-                    shutil.rmtree(work_dir)
-                    if folder_success:
-                        logger.info(f"  Cleaned up work directory: {work_dir}")
-                except Exception:
-                    logger.exception(
-                        f"  Failed to remove work directory: {work_dir}"
-                    )
-            else:
-                logger.info(
-                    f"  Preserving work directory for debugging: {work_dir}"
-                )
+    failed_folders = [folder for folder in find_image_folders(input_folder) if not process_folder(folder, args)]
 
     if failed_folders:
         logger.error(f"\nFinished with {len(failed_folders)} failed folder(s):")
@@ -746,7 +737,6 @@ def main(argv=None) -> int:
     else:
         logger.info("All folders converted.")
     logger.info(f"Log written to: {log_file}")
-
     return 1 if failed_folders else 0
 
 
