@@ -10,7 +10,7 @@ A single-file CLI (`image_to_pdf.py`) that turns folders of scanned images (`.ti
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt          # only Python dep: pikepdf
+pip install -r requirements.txt          # pikepdf, img2pdf, Pillow
 python image_to_pdf.py /path/to/images [--max-mb=100] [--ocr-lang=deu+eng]
 ```
 
@@ -24,7 +24,7 @@ There is no test suite, linter config, or build step. To verify changes, run the
 
 Per-folder stages, each writing to a numbered subdir of `<folder>/_work/`:
 
-1. `01_single_pages` — `convert_image_to_pdf` shells out to ImageMagick with `IMAGEMAGICK_INPUT_OPTS` before the input file and `IMAGEMAGICK_OUTPUT_OPTS` after it (density, sRGB conversion via `-profile SRGB_PROFILE`, resize cap, JPEG quality; ImageMagick uses 4:2:0 chroma below quality 90). `-profile` converts images with an embedded profile (e.g. Adobe RGB masters) to sRGB, tags untagged RGB as sRGB without changing pixels, and leaves untagged gray/CMYK alone; the profile survives OCRmyPDF to the final PDF. This is the pipeline's only lossy encode unless `OCR_OPTS` includes an option that re-encodes images (see below). Images are converted in parallel (`CONVERT_JOBS` threads, each running a `convert` limited to one thread via `-limit thread 1`); a failure cancels queued conversions.
+1. `01_single_pages` — `convert_image_to_pdf` shells out to ImageMagick with `IMAGEMAGICK_INPUT_OPTS` before the input file and `IMAGEMAGICK_OUTPUT_OPTS` after it (density, sRGB conversion via `-profile SRGB_PROFILE`, resize cap, JPEG quality, `-units PixelsPerInch` so the JPEG carries the density; ImageMagick uses 4:2:0 chroma below quality 90) to write a JPEG, which img2pdf wraps into a one-page PDF without re-encoding (`Rotation.none`: EXIF orientation is ignored). ImageMagick doesn't write the PDF itself: Ubuntu 22.04's default ImageMagick policy blocks the PDF coder, and its PDF writer adds a thumbnail and an opaque soft mask (for images with alpha) to every page. `strip_mismatched_icc` drops the sRGB profile that `-profile` attaches to untagged gray/CMYK images, which img2pdf would otherwise embed for CMYK. `-profile` converts images with an embedded profile (e.g. Adobe RGB masters) to sRGB, tags untagged RGB as sRGB without changing pixels, and leaves untagged gray/CMYK alone; the profile survives OCRmyPDF to the final PDF. This is the pipeline's only lossy encode unless `OCR_OPTS` includes an option that re-encodes images (see below). Images are converted in parallel (`CONVERT_JOBS` threads, each running a `convert` limited to one thread via `-limit thread 1`); a failure cancels queued conversions.
 2. `02_pre_ocr` — `merge_pdfs` merges all pages into one PDF (single save). OCRmyPDF parallelizes across pages itself, so one run per folder keeps all cores busy.
 3. `03_ocr` — `ocr_pdf` runs OCRmyPDF with `OCR_OPTS` plus `-l <ocr-lang>`. `--output-type pdf` gives a plain PDF rather than PDF/A. The `--optimize` level is a user-tunable size/quality trade-off: don't assume or document a specific value; read `OCR_OPTS` for the current one. `--no-ocr` adds `--tesseract-timeout 0`: no text layer, but OCRmyPDF still runs (and still rasterizes every page, so it saves only the Tesseract time). If OCRmyPDF fails it raises, failing the whole folder (no fallback).
 4. `04_split` — if the OCR'd PDF is larger than `--max-mb`, `split_final_pdf_by_size` splits it into `-partNN` files; otherwise the OCR output is the final PDF.

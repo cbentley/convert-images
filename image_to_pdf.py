@@ -14,13 +14,16 @@ import re
 import shutil
 import argparse
 import datetime
+import io
 import logging
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import img2pdf
 import pikepdf
+from PIL import Image
 
 
 # ============================================================
@@ -34,7 +37,7 @@ EXCLUDED_WORDS = {"ruler"}
 # Folder names that are too generic to name the output; use the parent's name instead
 GENERIC_FOLDER_NAMES = {"master"}
 
-# --- ImageMagick (image -> single-page PDF; the only lossy step) ---
+# --- ImageMagick (image -> JPEG; the only lossy step), then img2pdf wraps the JPEG into a one-page PDF ---
 IMAGEMAGICK_CMD = "convert" # Set to "magick" for ImageMagick versions > 6
 # Placed before the input file (read settings; -density must go here).
 # "-limit thread 1" keeps each process single-threaded, since CONVERT_JOBS already runs one per core.
@@ -48,7 +51,7 @@ IMAGEMAGICK_OUTPUT_OPTS = [
     "-profile", SRGB_PROFILE, # Before -resize, so pixels are converted before resizing and encoding
     "-resize", "3500x3500>",
     "-quality", "75",
-    "-compress", "jpeg",
+    "-units", "PixelsPerInch", # Store the density in the JPEG, so img2pdf sizes the page from -density
 ]
 # Number of images converted in parallel. Lower it if large TIFFs exhaust memory.
 CONVERT_JOBS = os.cpu_count() or 1
@@ -123,16 +126,49 @@ def validate_external_tools() -> None:
 # IMAGE TO SINGLE-PAGE PDF CONVERSION
 # ============================================================
 
+# ICC profile color space (header bytes 16-20) expected for each JPEG mode
+ICC_COLOR_SPACES = {"L": b"GRAY", "RGB": b"RGB ", "CMYK": b"CMYK"}
+
+
+def strip_mismatched_icc(jpeg: bytes) -> bytes:
+    """Remove the ICC profile from a JPEG if it doesn't match the image's color space.
+    ImageMagick's -profile tags untagged gray/CMYK images with the sRGB profile without converting them;
+    img2pdf would embed that RGB profile for a CMYK image, giving wrong colors. Pixel data is unchanged."""
+    with Image.open(io.BytesIO(jpeg)) as im:
+        icc = im.info.get("icc_profile")
+        if not icc or icc[16:20] == ICC_COLOR_SPACES.get(im.mode):
+            return jpeg
+    out = bytearray(jpeg[:2])  # SOI marker
+    i = 2
+    while i < len(jpeg):
+        marker = jpeg[i + 1]
+        if marker == 0xDA:  # Start of scan: the rest is image data
+            out += jpeg[i:]
+            break
+        segment = jpeg[i:i + 2 + int.from_bytes(jpeg[i + 2:i + 4], "big")]
+        if not (marker == 0xE2 and segment[4:16] == b"ICC_PROFILE\0"):
+            out += segment
+        i += len(segment)
+    return bytes(out)
+
+
 def convert_image_to_pdf(image_path: Path, output_pdf: Path) -> None:
-    """Convert a single image into a 1-page PDF using ImageMagick."""
+    """Convert a single image into a 1-page PDF: ImageMagick encodes a JPEG, img2pdf wraps it without re-encoding.
+    (ImageMagick's own PDF writer is blocked by the default security policy on Ubuntu 22.04, and adds a thumbnail
+    and, for images with an alpha channel, an opaque soft mask to every page.)"""
+    jpeg_path = output_pdf.with_suffix(".jpg")
     cmd = [
         IMAGEMAGICK_CMD,
         *IMAGEMAGICK_INPUT_OPTS,
         str(image_path),
         *IMAGEMAGICK_OUTPUT_OPTS,
-        str(output_pdf)
+        str(jpeg_path)
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    jpeg = strip_mismatched_icc(jpeg_path.read_bytes())
+    # Rotation.none ignores EXIF orientation, matching ImageMagick's PDF output
+    output_pdf.write_bytes(img2pdf.convert(jpeg, rotation=img2pdf.Rotation.none))
+    jpeg_path.unlink()
 
 
 def is_allowed_ext(path: Path) -> bool:
