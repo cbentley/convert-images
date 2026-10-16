@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Convert folders of images into OCR-processed, size-limited PDFs.
+Convert folders of images into OCR-processed, size-limited PDFs and/or JPEGs.
 
 Usage:
-    python image_to_pdf.py <folder> [options]
+    python convert_images.py pdf <folder> [options]
+    python convert_images.py jpg <folder>
 
 See README.md for full documentation.
 """
@@ -20,6 +21,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import NamedTuple
 
 import img2pdf
 import pikepdf
@@ -36,33 +38,38 @@ ALLOWED_EXT = {".tif", ".tiff", ".jpg", ".jpeg", ".jp2"}
 EXCLUDED_WORDS = {"ruler"}
 # Folder names that are too generic to name the output; use the parent's name instead
 GENERIC_FOLDER_NAMES = {"master"}
+# Output folders created inside each image folder. Folders with these names are never searched for images.
+PDF_DIR_NAME = "pdf"
+JPG_DIR_NAME = "jpg"
 
-# --- ImageMagick (image -> JPEG; the only lossy step), then img2pdf wraps the JPEG into a one-page PDF ---
+# --- ImageMagick (image -> JPEG; the only lossy step). For PDFs, img2pdf wraps the JPEG into a page ---
 # "magick" on ImageMagick 7 (where "convert" is deprecated), "convert" on ImageMagick 6
 IMAGEMAGICK_CMD = "magick" if shutil.which("magick") else "convert"
 # Placed before the input file (read settings; -density must go here).
 # "-limit thread 1" keeps each process single-threaded, since CONVERT_JOBS already runs one per core.
-# PDF page size is the original image's pixels / DPI, measured before -resize, so pages keep the scanned
-# object's real size. Uncomment the "-density" line to treat every image as 300 DPI instead (page size =
-# original pixels / 300); "-units" makes it apply to images whose DPI is in pixels/cm or missing.
+# Real size is the original image's pixels / DPI, measured before resizing: PDF pages get that size, and
+# resized JPEGs get a DPI scaled to keep it. Uncomment the "-density" line to treat every image as 300 DPI
+# instead (real size = original pixels / 300); "-units" makes it apply to images whose DPI is in pixels/cm or missing.
 IMAGEMAGICK_INPUT_OPTS = [
     "-limit", "thread", "1",
     # "-density", "300", "-units", "PixelsPerInch",
 ]
-# DPI assumed for images that don't store one, when -density is not set
+# DPI assumed for PDF page size when an image doesn't store one and -density is not set
 FALLBACK_DPI = 300
 # sRGB ICC profile. Images with an embedded profile (e.g. Adobe RGB) are converted to sRGB;
 # untagged RGB images are tagged as sRGB without changing pixels; untagged gray/CMYK are left as is.
 # Ubuntu: from the icc-profiles-free package. macOS: "/System/Library/ColorSync/Profiles/sRGB Profile.icc"
 SRGB_PROFILE = "/usr/share/color/icc/sRGB.icc"
-# Placed after the input file (processing and output encoding)
-IMAGEMAGICK_OUTPUT_OPTS = [
-    "-profile", SRGB_PROFILE, # Before -resize, so pixels are converted before resizing and encoding
-    #"-resize", "3500x3500>",
-    "-quality", "75",
-]
 # Number of images converted in parallel. Lower it if large TIFFs exhaust memory.
 CONVERT_JOBS = os.cpu_count() or 1
+
+# --- Image size and JPEG quality, per output ---
+# *_MAX_SIZE: scale images down so neither side exceeds this many pixels (None = keep full size).
+# *_QUALITY: JPEG quality 1-100. ImageMagick halves color resolution (4:2:0) below 90.
+PDF_MAX_SIZE = None
+PDF_QUALITY = 75
+JPG_MAX_SIZE = None
+JPG_QUALITY = 90
 
 # --- OCRmyPDF (language is set by --ocr-lang) ---
 OCR_CMD = "ocrmypdf"
@@ -78,7 +85,7 @@ OCR_OPTS = [
 # LOGGING SETUP
 # ============================================================
 
-logger = logging.getLogger("image_to_pdf_pipeline")
+logger = logging.getLogger("convert_images")
 
 
 def setup_logging(log_file: Path) -> None:
@@ -104,12 +111,11 @@ def setup_logging(log_file: Path) -> None:
 # VALIDATION
 # ============================================================
 
-def validate_external_tools() -> None:
-    """Verify ImageMagick, OCRmyPDF and the sRGB profile are available (OCRmyPDF runs even with --no-ocr)."""
-    tools = {
-        f"ImageMagick ({IMAGEMAGICK_CMD})": [IMAGEMAGICK_CMD, "--version"],
-        "OCRmyPDF": [OCR_CMD, "--version"],
-    }
+def validate_external_tools(need_ocrmypdf: bool) -> None:
+    """Verify ImageMagick, the sRGB profile and, for PDFs, OCRmyPDF are available (it runs even with --no-ocr)."""
+    tools = {f"ImageMagick ({IMAGEMAGICK_CMD})": [IMAGEMAGICK_CMD, "--version"]}
+    if need_ocrmypdf:
+        tools["OCRmyPDF"] = [OCR_CMD, "--version"]
 
     for name, cmd in tools.items():
         try:
@@ -131,17 +137,48 @@ def validate_external_tools() -> None:
 
 
 # ============================================================
-# IMAGE TO SINGLE-PAGE PDF CONVERSION
+# IMAGE CONVERSION (JPEG, and single-page PDF)
 # ============================================================
 
 # ICC profile color space (header bytes 16-20) expected for each JPEG mode
 ICC_COLOR_SPACES = {"L": b"GRAY", "RGB": b"RGB ", "CMYK": b"CMYK"}
 
 
+class ImageInfo(NamedTuple):
+    width: int
+    height: int
+    x_dpi: float
+    y_dpi: float
+    has_dpi: bool  # False if the file stores no DPI (x_dpi/y_dpi are then ImageMagick's placeholder 72)
+    frames: int    # Images in the file (multi-page TIFFs, Photoshop layers); only the first is used
+
+
+def read_image_info(image_path: Path) -> ImageInfo:
+    """Read size and DPI of the first image in a file from its header (-ping doesn't decode pixels).
+    IMAGEMAGICK_INPUT_OPTS apply, so an uncommented -density overrides the stored DPI.
+    ImageMagick reports 72 DPI with units "Undefined" when the file stores no DPI."""
+    cmd = [
+        IMAGEMAGICK_CMD,
+        *IMAGEMAGICK_INPUT_OPTS,
+        "-ping",
+        str(image_path),
+        "-format", "%w %h %x %y %U\n",  # One line per image in the file
+        "info:",
+    ]
+    result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    lines = result.stdout.splitlines()
+    width, height, x_dpi, y_dpi, units = lines[0].split()
+    x_dpi, y_dpi = float(x_dpi), float(y_dpi)
+    if units == "PixelsPerCentimeter":
+        x_dpi, y_dpi = x_dpi * 2.54, y_dpi * 2.54
+    has_dpi = units in ("PixelsPerInch", "PixelsPerCentimeter") and x_dpi > 0 and y_dpi > 0
+    return ImageInfo(int(width), int(height), x_dpi, y_dpi, has_dpi, len(lines))
+
+
 def strip_mismatched_icc(jpeg: bytes) -> bytes:
     """Remove the ICC profile from a JPEG if it doesn't match the image's color space.
     ImageMagick's -profile tags untagged gray/CMYK images with the sRGB profile without converting them;
-    img2pdf would embed that RGB profile for a CMYK image, giving wrong colors. Pixel data is unchanged."""
+    viewers and img2pdf would apply that RGB profile to a CMYK image, giving wrong colors. Pixel data is unchanged."""
     with Image.open(io.BytesIO(jpeg)) as im:
         icc = im.info.get("icc_profile")
         if not icc or icc[16:20] == ICC_COLOR_SPACES.get(im.mode):
@@ -160,41 +197,61 @@ def strip_mismatched_icc(jpeg: bytes) -> bytes:
     return bytes(out)
 
 
-def original_page_size(print_output: str) -> tuple[float, float]:
-    """Page size in points from ImageMagick's "-print '%w %h %x %y %U'" line for the original image.
-    ImageMagick reports 72 DPI with units "Undefined" when the file stores no DPI; FALLBACK_DPI is used then."""
-    width, height, x_dpi, y_dpi, units = print_output.split("\n")[0].split()
-    x_dpi, y_dpi = float(x_dpi), float(y_dpi)
-    if units == "PixelsPerCentimeter":
-        x_dpi, y_dpi = x_dpi * 2.54, y_dpi * 2.54
-    elif units != "PixelsPerInch" or x_dpi <= 0 or y_dpi <= 0:
-        x_dpi = y_dpi = FALLBACK_DPI
-    return int(width) / x_dpi * 72, int(height) / y_dpi * 72
-
-
-def convert_image_to_pdf(image_path: Path, output_pdf: Path) -> None:
-    """Convert a single image into a 1-page PDF: ImageMagick encodes a JPEG, img2pdf wraps it without re-encoding.
-    (ImageMagick's own PDF writer is blocked by the default security policy on Ubuntu 22.04, and adds a thumbnail
-    and, for images with an alpha channel, an opaque soft mask to every page.)"""
-    jpeg_path = output_pdf.with_suffix(".jpg")
+def encode_jpeg(image_path: Path, info: ImageInfo, jpeg_path: Path, max_size: int | None, quality: int,
+                keep_real_size: bool) -> None:
+    """Encode the first image of a file as an sRGB JPEG, scaled down so neither side exceeds max_size (if set).
+    With keep_real_size, the JPEG's DPI is scaled along with the pixels, so it keeps the original's real size;
+    images without a stored DPI are left without one."""
+    scale = 1.0
+    if max_size and max(info.width, info.height) > max_size:
+        scale = max_size / max(info.width, info.height)
     cmd = [
         IMAGEMAGICK_CMD,
         *IMAGEMAGICK_INPUT_OPTS,
-        str(image_path),
-        "-print", "%w %h %x %y %U\n",  # Original size and DPI, before -resize changes the pixel count
-        *IMAGEMAGICK_OUTPUT_OPTS,
-        str(jpeg_path)
+        f"{image_path}[0]",  # First image only (multi-page TIFFs, Photoshop layers)
+        "-profile", SRGB_PROFILE,  # Before -resize, so pixels are converted before resizing and encoding
+        *(["-resize", f"{max_size}x{max_size}>"] if scale < 1 else []),
+        *(["-units", "PixelsPerInch", "-density", f"{info.x_dpi * scale:.4f}x{info.y_dpi * scale:.4f}"]
+          if keep_real_size and info.has_dpi else []),
+        "-quality", str(quality),
+        str(jpeg_path),
     ]
-    result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    page_size = original_page_size(result.stdout)
-    jpeg = strip_mismatched_icc(jpeg_path.read_bytes())
-    # Rotation.none ignores EXIF orientation, matching ImageMagick's PDF output
-    output_pdf.write_bytes(img2pdf.convert(
-        jpeg,
-        rotation=img2pdf.Rotation.none,
-        layout_fun=lambda *_: (*page_size, *page_size),  # Image fills a page of the original's size
-    ))
-    jpeg_path.unlink()
+    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    jpeg = jpeg_path.read_bytes()
+    stripped = strip_mismatched_icc(jpeg)
+    if stripped is not jpeg:
+        jpeg_path.write_bytes(stripped)
+
+
+def page_size_points(info: ImageInfo) -> tuple[float, float]:
+    """PDF page size in points: the original image's real size (pixels / DPI, FALLBACK_DPI if it has none)."""
+    x_dpi, y_dpi = (info.x_dpi, info.y_dpi) if info.has_dpi else (FALLBACK_DPI, FALLBACK_DPI)
+    return info.width / x_dpi * 72, info.height / y_dpi * 72
+
+
+def convert_image(image_path: Path, page_pdf: Path | None, jpg_path: Path | None) -> None:
+    """Convert one image into a one-page PDF (page_pdf) and/or a standalone JPEG (jpg_path).
+    PDF pages: ImageMagick encodes a JPEG and img2pdf wraps it without re-encoding. (ImageMagick's own PDF writer
+    is blocked by the default security policy on Ubuntu 22.04, and adds a thumbnail and, for images with an
+    alpha channel, an opaque soft mask to every page.)"""
+    info = read_image_info(image_path)
+    if info.frames > 1:
+        logger.warning(f"  {image_path.name} contains {info.frames} images; using only the first")
+
+    if page_pdf:
+        page_jpeg = page_pdf.with_suffix(".jpg")
+        encode_jpeg(image_path, info, page_jpeg, PDF_MAX_SIZE, PDF_QUALITY, keep_real_size=False)
+        page_size = page_size_points(info)
+        # Rotation.none ignores EXIF orientation, matching ImageMagick's PDF output
+        page_pdf.write_bytes(img2pdf.convert(
+            page_jpeg.read_bytes(),
+            rotation=img2pdf.Rotation.none,
+            layout_fun=lambda *_: (*page_size, *page_size),  # Image fills a page of the original's size
+        ))
+        page_jpeg.unlink()
+
+    if jpg_path:
+        encode_jpeg(image_path, info, jpg_path, JPG_MAX_SIZE, JPG_QUALITY, keep_real_size=True)
 
 
 def is_allowed_ext(path: Path) -> bool:
@@ -221,29 +278,52 @@ def natural_sort_key(path: Path) -> tuple:
     return ([int(t) if i % 2 else t.lower() for i, t in enumerate(parts)], path.name)
 
 
-def convert_all_images(folder: Path, single_pages_dir: Path) -> list[Path]:
-    """Convert all allowed images in a folder into single-page PDFs."""
+def select_images(folder: Path) -> list[Path]:
+    """Return the folder's wanted images in natural order, logging excluded ones."""
     candidates = [p for p in folder.iterdir() if is_allowed_ext(p)]
     images = sorted((p for p in candidates if not is_excluded(p)), key=natural_sort_key)
     skipped = sorted(p.name for p in candidates if is_excluded(p))
     if skipped:
         logger.info(f"  Skipped {len(skipped)} excluded image(s): {', '.join(skipped)}")
+    return images
 
-    if not images:
-        logger.warning("  No valid images found.")
-        return []
 
-    logger.info(f"  Found {len(images)} images")
+class FolderError(Exception):
+    """A problem with a folder's contents that fails the folder; logged as a plain message, without a traceback."""
 
+
+def jpg_name(image: Path) -> str:
+    """Output filename of an image's standalone JPEG."""
+    return f"{image.stem}.jpg"
+
+
+def check_jpg_name_clashes(images: list[Path]) -> None:
+    """Raise if two images would get the same JPEG name (e.g. a.tif and a.jpg), instead of one overwriting the other.
+    Compared case-insensitively, since Windows folders (/mnt/c in WSL) don't distinguish case."""
+    by_name: dict[str, list[str]] = {}
+    for image in images:
+        by_name.setdefault(jpg_name(image).lower(), []).append(image.name)
+    clashes = [names for names in by_name.values() if len(names) > 1]
+    if clashes:
+        raise FolderError(
+            "These images would get the same JPEG name: " + "; ".join(" and ".join(names) for names in clashes)
+        )
+
+
+def convert_all_images(folder: Path, images: list[Path], single_pages_dir: Path | None,
+                       jpg_dir: Path | None) -> list[Path]:
+    """Convert images into single-page PDFs in single_pages_dir and/or JPEGs in jpg_dir (either may be None).
+    Returns the page PDFs in page order (empty if single_pages_dir is None)."""
     pdf_pages = [
         single_pages_dir / f"{folder.name}_page{idx:06d}.pdf"
         for idx in range(len(images))
-    ]
+    ] if single_pages_dir else [None] * len(images)
+    jpgs = [jpg_dir / jpg_name(img) for img in images] if jpg_dir else [None] * len(images)
 
     with ThreadPoolExecutor(max_workers=CONVERT_JOBS) as executor:
         futures = [
-            executor.submit(convert_image_to_pdf, img, pdf_path)
-            for img, pdf_path in zip(images, pdf_pages)
+            executor.submit(convert_image, img, pdf_path, jpg_path)
+            for img, pdf_path, jpg_path in zip(images, pdf_pages, jpgs)
         ]
         try:
             for future in futures:
@@ -253,8 +333,9 @@ def convert_all_images(folder: Path, single_pages_dir: Path) -> list[Path]:
             executor.shutdown(cancel_futures=True)
             raise
 
-    logger.info(f"  Converted {len(pdf_pages)} images to PDFs")
-    return pdf_pages
+    outputs = [name for name, wanted in (("PDF pages", single_pages_dir), ("JPEGs", jpg_dir)) if wanted]
+    logger.info(f"  Converted {len(images)} images to {' and '.join(outputs)}")
+    return pdf_pages if single_pages_dir else []
 
 
 # ============================================================
@@ -425,24 +506,49 @@ def ocr_pdf(input_pdf: Path, output_pdf: Path, ocr_lang: str, no_ocr: bool = Fal
 # ============================================================
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Convert folders of scanned images to OCR'd PDFs.")
-    parser.add_argument("folder")
-    parser.add_argument(
+    parser = argparse.ArgumentParser(
+        description="Convert folders of scanned images to OCR'd PDFs and/or JPEGs."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    pdf_parser = subparsers.add_parser(
+        "pdf",
+        help="Make an OCR'd PDF per image folder, in its pdf folder",
+        description="Make an OCR'd, size-limited PDF per image folder, written to a pdf folder inside it.",
+    )
+    pdf_parser.add_argument("folder")
+    pdf_parser.add_argument(
         "--max-mb",
         type=int,
         default=100,
         help="Maximum size in MB for each final PDF before splitting. Default: 100"
     )
-    parser.add_argument(
+    pdf_parser.add_argument(
         "--ocr-lang",
         default="deu+eng",
         help='Languages to use for OCR. Examples: "eng", "deu", "eng+deu".'
     )
-    parser.add_argument(
+    pdf_parser.add_argument(
         "--no-ocr",
         action="store_true",
         help="Skip text recognition. OCRmyPDF still runs, so OCR_OPTS such as --optimize still apply."
     )
+    pdf_parser.add_argument(
+        "--jpg",
+        action="store_true",
+        help="Also save each image as a JPEG in a jpg folder inside its image folder."
+    )
+    pdf_parser.set_defaults(make_pdf=True)
+
+    jpg_parser = subparsers.add_parser(
+        "jpg",
+        aliases=["jpeg"],
+        help="Save each image as a JPEG, in a jpg folder inside its image folder",
+        description="Save each image as a JPEG, written to a jpg folder inside its image folder.",
+    )
+    jpg_parser.add_argument("folder")
+    jpg_parser.set_defaults(make_pdf=False, jpg=True)
+
     return parser.parse_args(argv)
 
 
@@ -453,9 +559,27 @@ def output_base_name(folder: Path) -> str:
     return folder.name
 
 
-def cleanup_partial_outputs(folder: Path, base_name: str) -> None:
-    """Remove partial merged PDFs after a failure (root-level, if any)."""
-    for pdf in folder.glob(f"{base_name}-part*.pdf"):
+def is_output_dir(name: str) -> bool:
+    """True for the script's own output folders, which are never searched for images."""
+    return name.lower() in (PDF_DIR_NAME.lower(), JPG_DIR_NAME.lower())
+
+
+def move_outputs(files: list[Path], dest_dir: Path) -> None:
+    """Move finished files from _work into dest_dir, replacing files with the same name."""
+    dest_dir.mkdir(exist_ok=True)
+    for file in files:
+        dest = dest_dir / file.name
+        if dest.exists():
+            try:
+                dest.unlink()
+            except Exception:
+                logger.exception(f"  Failed to remove existing file before overwrite: {dest}")
+        file.rename(dest)
+
+
+def cleanup_partial_outputs(pdf_dir: Path, base_name: str) -> None:
+    """Remove partial split PDFs after a failure (in the pdf folder, if any)."""
+    for pdf in pdf_dir.glob(f"{base_name}-part*.pdf"):
         try:
             pdf.unlink()
             logger.info(f"  Removed partial output: {pdf.name}")
@@ -469,10 +593,11 @@ def cleanup_partial_outputs(folder: Path, base_name: str) -> None:
 
 def main(argv=None) -> int:
     """
-    Run the full image→PDF→OCR pipeline with temp work directories.
+    Convert every image folder to a PDF (image→PDF→OCR pipeline) and/or JPEGs, with temp work directories.
     Returns the process exit code: 0 if all folders succeeded, 1 otherwise.
     """
     args = parse_args(argv)
+    make_pdf, make_jpg = args.make_pdf, args.jpg
 
     input_folder = Path(args.folder).resolve()
 
@@ -482,16 +607,17 @@ def main(argv=None) -> int:
     logs_dir.mkdir(exist_ok=True)
     log_file = logs_dir / f"{timestamp}_log.txt"
     setup_logging(log_file)
-    logger.info(f"Starting pipeline for {input_folder}")
+    outputs = " and ".join(name for name, wanted in (("PDFs", make_pdf), ("JPEGs", make_jpg)) if wanted)
+    logger.info(f"Converting images to {outputs} in {input_folder}")
 
-    validate_external_tools()
+    validate_external_tools(need_ocrmypdf=make_pdf)
 
     failed_folders: list[Path] = []
 
     # Folder processing
     for root, dirs, files in os.walk(input_folder):
-        # Skip folders starting with "_"
-        dirs[:] = [d for d in dirs if not d.startswith("_")]
+        # Skip folders starting with "_" (work and log folders) and the script's own output folders
+        dirs[:] = [d for d in dirs if not d.startswith("_") and not is_output_dir(d)]
 
         # Skip folders with no files
         if not files:
@@ -503,6 +629,7 @@ def main(argv=None) -> int:
 
         root_path = Path(root)
         base_name = output_base_name(root_path)
+        pdf_dir = root_path / PDF_DIR_NAME
 
         logger.info(f"\nProcessing folder: {root_path}")
 
@@ -512,75 +639,94 @@ def main(argv=None) -> int:
         pre_ocr_dir      = work_dir / "02_pre_ocr"
         ocr_dir          = work_dir / "03_ocr"
         split_dir        = work_dir / "04_split"
+        jpg_work_dir     = work_dir / "jpg"
 
         # Ensure work subfolders exist
-        single_pages_dir.mkdir(parents=True, exist_ok=True)
-        pre_ocr_dir.mkdir(parents=True, exist_ok=True)
-        ocr_dir.mkdir(parents=True, exist_ok=True)
-        split_dir.mkdir(parents=True, exist_ok=True)
+        for d in [single_pages_dir, pre_ocr_dir, ocr_dir, split_dir] if make_pdf else []:
+            d.mkdir(parents=True, exist_ok=True)
+        if make_jpg:
+            jpg_work_dir.mkdir(parents=True, exist_ok=True)
 
         folder_success = True
+        keep_work = False  # Kept for debugging after unexpected failures
 
         try:
-            # 1. Convert images -> single-page PDFs (in _work/single_pages)
-            page_pdfs = convert_all_images(root_path, single_pages_dir)
-            if not page_pdfs:
-                # No PDFs to process; leave work_dir empty for this folder
+            images = select_images(root_path)
+            if not images:
+                # Nothing to convert; leave work_dir empty for this folder
+                logger.warning("  No valid images found.")
                 continue
+            logger.info(f"  Found {len(images)} images")
+            if make_jpg:
+                check_jpg_name_clashes(images)
 
-            # 2. Pre-OCR merge: all pages into one PDF in _work/02_pre_ocr
-            pre_ocr_pdf = merge_pdfs(page_pdfs, pre_ocr_dir / f"{base_name}.pdf")
+            # 1. Convert images -> single-page PDFs (in _work/01_single_pages) and/or JPEGs (in _work/jpg)
+            page_pdfs = convert_all_images(
+                root_path,
+                images,
+                single_pages_dir if make_pdf else None,
+                jpg_work_dir if make_jpg else None,
+            )
 
-            # 3. OCR the merged PDF into _work/03_ocr (with --no-ocr, OCR_OPTS only)
-            ocr_output = ocr_dir / f"{base_name}.pdf"
-            ocr_pdf(pre_ocr_pdf, ocr_output, args.ocr_lang, args.no_ocr)
+            final_pdfs: list[Path] = []
+            if make_pdf:
+                # 2. Pre-OCR merge: all pages into one PDF in _work/02_pre_ocr
+                pre_ocr_pdf = merge_pdfs(page_pdfs, pre_ocr_dir / f"{base_name}.pdf")
 
-            # 4. Split into parts in _work/04_split if over --max-mb
-            final_size = pdf_size_mb(ocr_output)
+                # 3. OCR the merged PDF into _work/03_ocr (with --no-ocr, OCR_OPTS only)
+                ocr_output = ocr_dir / f"{base_name}.pdf"
+                ocr_pdf(pre_ocr_pdf, ocr_output, args.ocr_lang, args.no_ocr)
 
-            if final_size > args.max_mb:
-                logger.info(
-                    f"  PDF {ocr_output.name} is {final_size:.1f} MB "
-                    f"(>{args.max_mb} MB); splitting..."
-                )
-                final_outputs = split_final_pdf_by_size(ocr_output, split_dir, args.max_mb)
-            else:
-                logger.info(
-                    f"  PDF {ocr_output.name} is {final_size:.1f} MB "
-                    f"(<= {args.max_mb} MB); no splitting needed."
-                )
-                final_outputs = [ocr_output]
+                # 4. Split into parts in _work/04_split if over --max-mb
+                final_size = pdf_size_mb(ocr_output)
 
-            # 5. Move final PDFs from _work to root folder, overwriting if needed
-            for pdf in final_outputs:
-                dest = root_path / pdf.name
-                if dest.exists():
-                    try:
-                        dest.unlink()
-                    except Exception:
-                        logger.exception(
-                            f"  Failed to remove existing file before overwrite: {dest}"
-                        )
-                pdf.rename(dest)
-                logger.info(f"  Final output written: {dest}")
+                if final_size > args.max_mb:
+                    logger.info(
+                        f"  PDF {ocr_output.name} is {final_size:.1f} MB "
+                        f"(>{args.max_mb} MB); splitting..."
+                    )
+                    final_pdfs = split_final_pdf_by_size(ocr_output, split_dir, args.max_mb)
+                else:
+                    logger.info(
+                        f"  PDF {ocr_output.name} is {final_size:.1f} MB "
+                        f"(<= {args.max_mb} MB); no splitting needed."
+                    )
+                    final_pdfs = [ocr_output]
+
+            # 5. Move outputs from _work into the pdf and jpg folders, overwriting if needed
+            if make_pdf:
+                move_outputs(final_pdfs, pdf_dir)
+                for pdf in final_pdfs:
+                    logger.info(f"  Final output written: {pdf_dir / pdf.name}")
+            if make_jpg:
+                jpg_dir = root_path / JPG_DIR_NAME
+                move_outputs(sorted(jpg_work_dir.iterdir()), jpg_dir)
+                logger.info(f"  {len(images)} JPEGs written to: {jpg_dir}")
 
         except KeyboardInterrupt:
             folder_success = False
+            keep_work = True
             logger.error("Interrupted by user (Ctrl-C); leaving _work for debugging.")
             raise   # re-raise so the whole script stops immediately
-        except Exception:
+        except Exception as e:
             folder_success = False
-            logger.exception(f"Folder failed: {root_path}; leaving _work for debugging.")
+            if isinstance(e, FolderError):
+                logger.error(f"Folder failed: {root_path}\n  {e}")
+            else:
+                keep_work = True
+                logger.exception(f"Folder failed: {root_path}; leaving _work for debugging.")
             failed_folders.append(root_path)
-            # Clean up any partial root-level outputs matching the folder base name
-            cleanup_partial_outputs(root_path, base_name)
+            # Clean up any partial split PDFs matching the folder base name
+            if make_pdf:
+                cleanup_partial_outputs(pdf_dir, base_name)
             continue
         finally:
-            # 6. Clean up work directory on success; keep on failure
-            if folder_success:
+            # 6. Clean up work directory, unless kept for debugging after a failure
+            if not keep_work:
                 try:
                     shutil.rmtree(work_dir)
-                    logger.info(f"  Cleaned up work directory: {work_dir}")
+                    if folder_success:
+                        logger.info(f"  Cleaned up work directory: {work_dir}")
                 except Exception:
                     logger.exception(
                         f"  Failed to remove work directory: {work_dir}"
@@ -591,11 +737,11 @@ def main(argv=None) -> int:
                 )
 
     if failed_folders:
-        logger.error(f"\nPipeline finished with {len(failed_folders)} failed folder(s):")
+        logger.error(f"\nFinished with {len(failed_folders)} failed folder(s):")
         for folder in failed_folders:
             logger.error(f"  {folder}")
     else:
-        logger.info("Pipeline complete.")
+        logger.info("All folders converted.")
     logger.info(f"Log written to: {log_file}")
 
     return 1 if failed_folders else 0
