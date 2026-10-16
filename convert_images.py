@@ -529,12 +529,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--max-mb",
         type=int,
         default=100,
-        help="Maximum size in MB for each final PDF before splitting. Default: 100"
+        help="Maximum size in MB for each final PDF before splitting. Default: %(default)s"
     )
     pdf_parser.add_argument(
         "--ocr-lang",
         default="deu+eng",
-        help='Languages to use for OCR. Examples: "eng", "deu", "eng+deu".'
+        help='Languages to use for OCR. Examples: "eng", "deu", "eng+deu". Default: %(default)s'
     )
     pdf_parser.add_argument(
         "--no-ocr",
