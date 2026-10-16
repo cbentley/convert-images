@@ -17,7 +17,19 @@ python convert_images.py jpg /path/to/images
 
 External tools must be on PATH: ImageMagick, OCRmyPDF (with Ghostscript and Tesseract language packs), and `pngquant` (needed by OCRmyPDF for `--optimize 2/3`). `jbig2` is unused, since every page is JPEG and OCRmyPDF only applies JBIG2 to 1-bit images. `validate_external_tools()` checks ImageMagick and the sRGB profile at startup, plus OCRmyPDF for `pdf` (not `pngquant`).
 
-There is no test suite, linter config, or build step. To verify changes, run the script against a small sample folder of images; logs go to `<input>/_logs/<timestamp>_log.txt`.
+Tests (pytest; `pip install -r requirements-dev.txt`):
+
+```bash
+python -m pytest                     # all tests, a few seconds
+python -m pytest -m "not integration"  # only the pure-Python tests
+```
+
+- `tests/test_unit.py`: selection, naming, sorting, `strip_mismatched_icc`, `parse_args`, output-file helpers.
+- `tests/test_split.py`: `split_pdf_by_size` against a reference that adds and saves one page at a time, with estimates deliberately scaled wrong (so both correction loops are exercised) and a save-count check (so a bad estimate shows up). Built with pikepdf, no external tools.
+- `tests/test_pipeline.py` (marked `integration`): runs `main()` on images generated with ImageMagick at test time (no binary fixtures) and checks page order and sizes, DPI, color profiles, text layer, splitting, `--no-ocr`, and failure handling. Skipped if ImageMagick, `SRGB_PROFILE`, OCRmyPDF or Tesseract's `eng` data is missing; the Adobe RGB test also needs `icc-profiles-free`'s `AdobeCompat-v2.icc`.
+- Tests check properties (size, DPI, color space, profile), not exact pixels or bytes, so they hold across ImageMagick 6/7 and OCRmyPDF versions. `conftest.py` removes the logger handlers `main()` adds.
+
+For changes the tests don't cover, also run the script on a sample folder; logs go to `<input>/_logs/<timestamp>_log.txt`. There is no linter config or build step.
 
 ## Architecture
 
@@ -120,7 +132,7 @@ Instructions for the coworker: work in a plain local folder like `C:\Scans` (not
 - Wrap any Ghostscript `txtwrite` text-extraction check in a timeout: Ghostscript 9.55 (Ubuntu 22.04) hangs on OCR'd PDFs. The pipeline itself doesn't use `txtwrite`.
 - `run.sh` and `update.sh` can be partly tested in the containers (prompts, path checks, exit-code messages) by passing a Linux path as `$1`; the picker, shortcuts, `wslpath` and drag-and-drop need the real Windows machine.
 - To run the script natively on the Mac, use a test copy with `SRGB_PROFILE = "/System/Library/ColorSync/Profiles/sRGB Profile.icc"` (Homebrew's ImageMagick 7 is picked up as `magick` automatically); the committed defaults are for Ubuntu.
-- The comparison and test scripts from the first session were in a temporary folder and weren't kept; regenerate them from the description above, or commit them under `tests/` next time.
+- Run `python -m pytest` in each container; the integration tests generate the synthetic scans described above (a few cases, like 1-bit images, aren't covered yet).
 
 ### Still to verify on the real machine
 

@@ -80,6 +80,16 @@ If any step fails for a folder, including OCR (there is no non-OCR fallback), th
 
 Exit status: `0` if all folders succeeded, `1` if any failed, `2` for invalid options or a folder that doesn't exist.
 
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest                       # all tests
+python -m pytest -m "not integration"  # skip the tests that run ImageMagick and OCRmyPDF
+```
+
+The integration tests generate their own small images and are skipped if ImageMagick, the sRGB profile, OCRmyPDF or Tesseract's English data is missing.
+
 ## Configuration
 
 Other settings are constants at the top of `convert_images.py`:
