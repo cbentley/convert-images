@@ -58,23 +58,23 @@ Goal: a coworker who isn't a programmer runs the script on their Windows PC thro
 - **Logs:** the script prints progress to the console and writes `<chosen folder>/_logs/<timestamp>_log.txt`. The bash script turns the exit code into a plain message (0 = all folders OK; 1 = some folder failed; any other nonzero code, e.g. 2 for a bad option, is also a failure); when something fails, the coworker sends that log file.
 - **ImageMagick writes JPEGs, img2pdf makes the PDFs** (commit `66521dd`). This avoids Ubuntu 22.04's ImageMagick policy, which blocks the PDF coder. Don't go back to ImageMagick's PDF output.
 
-### Done (branch `perf/faster-pipeline`, pushed; not yet merged to `main`)
+### Done (merged to `main`)
 
 - `23b31d3` argparse program name showed as `Ellipsis` in usage/errors.
 - `27d8604` natural page order (`scan_2` before `scan_10`, case ignored; close to, but not exactly, Windows Explorer's order).
 - `66521dd` ImageMagick → JPEG → img2pdf. Verified on Ubuntu 24.04 and 22.04 against the old output: identical decoded pixels, page sizes, rotation, colors (incl. CMYK) and OCR text; final PDFs ~24% smaller (no thumbnail / opaque SMask per page). Also runs on Ubuntu 26.04 with the same page sizes.
+- `f5be165` PDF pages keep the scanned object's real size (original pixels ÷ DPI, read with `-print` before resizing; `-density 300` and the `-resize` cap commented out), and `IMAGEMAGICK_CMD` picks `magick` when available. Tested only with ImageMagick 7.1.2 (WSL Ubuntu); the `-print` step and page sizes still need a check on 22.04/24.04 (ImageMagick 6).
 
 ### Remaining steps
 
-1. **Merge `perf/faster-pipeline` into `main`** (PR), since the coworker's clone tracks `main`.
-2. **`windows/run.sh`** (bash, LF line endings, executable; the shortcut runs it):
+1. **`windows/run.sh`** (bash, LF line endings, executable; the shortcut runs it):
    - Folder: use `$1` if given (dropped on the icon); otherwise open a Windows folder picker by calling `powershell.exe` from WSL (`System.Windows.Forms.FolderBrowserDialog`; set `[Console]::OutputEncoding` to UTF-8 so umlauts survive, strip the trailing `\r`, and give the dialog a topmost owner window so it doesn't open behind the console). Cancel → exit cleanly.
    - Convert with `wslpath -a`, then check the folder exists (`[ -d ]`). If not, explain in plain words: UNC paths (`\\server\share`) don't convert, and mapped drive letters (`S:\`) convert to `/mnt/s`, which doesn't exist in WSL; ask them to copy the scans to a local folder like `C:\Scans`.
    - Prompts (`read -r -p`): max MB `[100]`, OCR languages `[deu+eng]`, recognize text `(Y/n)` → `--max-mb`, `--ocr-lang`, `--no-ocr`. Validate the MB value is a whole number and re-ask otherwise.
    - Run `"$HOME/image-to-pdf/env/bin/python" "$HOME/image-to-pdf/image_to_pdf.py" "$folder" ...` with every variable quoted.
    - Exit code 0 → "All PDFs created."; anything else → "Some folders failed. Please send Chris the newest file in the _logs folder inside <folder>." Then `read -r -p "Press Enter to close this window"`, so the window never closes before they've read the result.
-3. **`windows/update.sh`:** `git -C "$HOME/image-to-pdf" pull --ff-only`, then `env/bin/pip install -r requirements.txt`; print a clear success or failure message and wait for Enter.
-4. **`setup.sh`** at the repo root, run once inside their WSL; must be safe to re-run:
+2. **`windows/update.sh`:** `git -C "$HOME/image-to-pdf" pull --ff-only`, then `env/bin/pip install -r requirements.txt`; print a clear success or failure message and wait for Enter.
+3. **`setup.sh`** at the repo root, run once inside their WSL; must be safe to re-run:
    - `sudo apt update`, then `sudo apt install -y imagemagick ocrmypdf pngquant tesseract-ocr-deu tesseract-ocr-eng icc-profiles-free python3-venv git` (only the needed language packs; `tesseract-ocr-all` is huge). `sudo` asks for the coworker's WSL (Linux) password, so run setup together with them.
    - create `env/` and `pip install -r requirements.txt`
    - self-test: generate a few small images at runtime with `magick`, or `convert` on ImageMagick 6 (don't commit binaries), run the script on them, and check that a PDF was produced with a text layer (e.g. pikepdf: every page has a `/Font` resource). End with a clear "Setup OK" or a plain error.
@@ -83,7 +83,7 @@ Goal: a coworker who isn't a programmer runs the script on their Windows PC thro
      - "Update Scans to PDF": the same with `windows/update.sh`
      - Take `<distro>` from `$WSL_DISTRO_NAME` and the path from `$HOME`. `--exec` doesn't expand `~` in the command itself, so it must be an absolute path.
    - also add `pngquant` to the README's Ubuntu install line
-5. **Handover on their machine** (none of the Windows side can be tested from the Mac):
+4. **Handover on their machine** (none of the Windows side can be tested from the Mac):
    - First confirm `wsl -l -v` shows VERSION 2 and an LTS Ubuntu.
    - Run `setup.sh`, then check that both desktop icons appear.
    - Test with real data:
