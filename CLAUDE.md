@@ -55,14 +55,14 @@ Implementation notes:
 
 ## In progress: sharing the script with a non-programmer coworker on Windows/WSL
 
-**On hold** until `convert_images.py` (branch `feat/convert-images`: `pdf`/`jpg` subcommands, `pdf/` and `jpg/` output folders) is merged; then the scripts below need the new name, a JPEG option or icon, and the self-test should cover both outputs. The GitHub repo has been renamed from `image-to-pdf` to `convert-images` (the old URL redirects); the paths below use the new name.
+**Unblocked:** `convert_images.py` (`pdf`/`jpg` subcommands, `pdf/` and `jpg/` output folders) is merged to `main` (`95bb779`). The steps below are updated for it: the new name, a choice of PDF, JPEGs or both, and a self-test covering both outputs. The GitHub repo has been renamed from `image-to-pdf` to `convert-images` (the old URL redirects); the paths below use the new name.
 
 Goal: a coworker who isn't a programmer runs the script on their Windows PC through WSL (Ubuntu) without ever using a terminal. It must work reliably, so every step is scripted and tested, and anything that can't be tested from the Mac is listed for the handover test.
 
 ### Decisions (and why)
 
 - **Run inside WSL Ubuntu**, not native Windows (ImageMagick/OCRmyPDF/Tesseract are painful to install there) and not Docker (too much to support for a non-programmer). Fallback if WSL proves unreliable: run the script on a machine we control and have the coworker drop scans into a shared watched folder.
-- **Ubuntu version: an LTS, installed by explicit name** (e.g. `wsl --install -d Ubuntu-26.04`; check exact names with `wsl --list --online`). Plain `wsl --install` gives whatever "Ubuntu" currently points to, and a non-LTS or future release may bring a Python that `pikepdf>=10.0.2,<10.1` has no wheels for. The full pipeline has been tested on 22.04, 24.04 and 26.04 (see Testing).
+- **Ubuntu version: an LTS, installed by explicit name** (e.g. `wsl --install -d Ubuntu-26.04`; check exact names with `wsl --list --online`). Plain `wsl --install` gives whatever "Ubuntu" currently points to, and a non-LTS or future release may bring a Python that `pikepdf>=10.0.2,<10.1` has no wheels for. The pipeline as of `f5be165` was tested on 22.04, 24.04 and 26.04; everything since has only run on 26.04 (see Testing).
 - **Install from a git clone** of the public repo (`https://github.com/cbentley/convert-images`, HTTPS so no credentials) into `~/convert-images` inside WSL, tracking `main`, with the venv at `env/`. Updates are `git pull` plus `pip install -r requirements.txt`. Nothing generated for this machine (launchers, paths, distro name) may be written into tracked files, or `git pull` will conflict.
 - **Desktop icons are Windows shortcuts (`.lnk`) that start `wsl.exe` directly; all logic lives in bash scripts in the repo.** Not `.bat` files, because:
   - cmd.exe splits a dragged path containing `&` (Explorer only quotes dragged paths that contain spaces);
@@ -79,24 +79,27 @@ Goal: a coworker who isn't a programmer runs the script on their Windows PC thro
 - `23b31d3` argparse program name showed as `Ellipsis` in usage/errors.
 - `27d8604` natural page order (`scan_2` before `scan_10`, case ignored; close to, but not exactly, Windows Explorer's order).
 - `66521dd` ImageMagick → JPEG → img2pdf. Verified on Ubuntu 24.04 and 22.04 against the old output: identical decoded pixels, page sizes, rotation, colors (incl. CMYK) and OCR text; final PDFs ~24% smaller (no thumbnail / opaque SMask per page). Also runs on Ubuntu 26.04 with the same page sizes.
-- `f5be165` PDF pages keep the scanned object's real size (original pixels ÷ DPI, read with `-print` before resizing; `-density 300` and the `-resize` cap commented out), and `IMAGEMAGICK_CMD` picks `magick` when available. Tested only with ImageMagick 7.1.2 (WSL Ubuntu); the `-print` step and page sizes still need a check on 22.04/24.04 (ImageMagick 6).
+- `f5be165` PDF pages keep the scanned object's real size (original pixels ÷ DPI, read before resizing; `-density 300` and the `-resize` cap commented out), and `IMAGEMAGICK_CMD` picks `magick` when available.
+- `95bb779` (branch `feat/convert-images`, fast-forwarded): rename to `convert_images.py` with `pdf`/`jpg` subcommands and `pdf/`/`jpg/` output folders; `.jpf` input; `main()` split into folder-processing functions; pytest suite with generated images; metadata stripped from all outputs; `-auto-orient`; web-sized progressive JPEGs; the compact sRGB profile in `profiles/` (so `icc-profiles-free` is no longer needed); `--no-ocr` ignores `--ocr-lang`.
+- **Only tested on ImageMagick 7.1.2 (Ubuntu 26.04):** everything ImageMagick-related since `66521dd`: reading size/DPI/orientation with `-ping -format`, `-auto-orient`, `+profile '!icc,*'`, `+set comment`, `-interlace JPEG`, and page sizes. Run the test suite on 22.04/24.04 (ImageMagick 6) before the handover (step 0).
 
 ### Remaining steps
 
+0. **Test on ImageMagick 6:** run `python -m pytest` on Ubuntu 22.04 and 24.04, either in containers (see Testing) or with a GitHub Actions workflow (matrix `ubuntu-22.04`/`ubuntu-24.04`; `apt install imagemagick ocrmypdf pngquant tesseract-ocr-eng icc-profiles-free`, `pip install -r requirements-dev.txt`, `pytest`), which would also run the tests on every push.
 1. **`windows/run.sh`** (bash, LF line endings, executable; the shortcut runs it):
    - Folder: use `$1` if given (dropped on the icon); otherwise open a Windows folder picker by calling `powershell.exe` from WSL (`System.Windows.Forms.FolderBrowserDialog`; set `[Console]::OutputEncoding` to UTF-8 so umlauts survive, strip the trailing `\r`, and give the dialog a topmost owner window so it doesn't open behind the console). Cancel → exit cleanly.
    - Convert with `wslpath -a`, then check the folder exists (`[ -d ]`). If not, explain in plain words: UNC paths (`\\server\share`) don't convert, and mapped drive letters (`S:\`) convert to `/mnt/s`, which doesn't exist in WSL; ask them to copy the scans to a local folder like `C:\Scans`.
-   - Prompts (`read -r -p`): max MB `[100]`, OCR languages `[deu+eng]`, recognize text `(Y/n)` → `--max-mb`, `--ocr-lang`, `--no-ocr`. Validate the MB value is a whole number and re-ask otherwise.
-   - Run `"$HOME/convert-images/env/bin/python" "$HOME/convert-images/convert_images.py" pdf "$folder" ...` with every variable quoted.
-   - Exit code 0 → "All PDFs created."; anything else → "Some folders failed. Please send Chris the newest file in the _logs folder inside <folder>." Then `read -r -p "Press Enter to close this window"`, so the window never closes before they've read the result.
+   - Prompts (`read -r -p`): what to make, PDF / JPEGs / both (default to agree on with Chris; the JPEGs are the access copies for Rosetta) → `pdf`, `jpg` or `pdf --jpg`. Only when a PDF is made: max MB `[100]`, OCR languages `[deu+eng]`, recognize text `(Y/n)` → `--max-mb`, `--ocr-lang`, `--no-ocr`. Validate the MB value is a whole number and re-ask otherwise.
+   - Run `"$HOME/convert-images/env/bin/python" "$HOME/convert-images/convert_images.py" <command> "$folder" ...` with every variable quoted.
+   - Exit code 0 → "All done." (naming what was made: PDFs in the `pdf` folders, JPEGs in the `jpg` folders); anything else → "Some folders failed. Please send Chris the newest file in the _logs folder inside <folder>." Then `read -r -p "Press Enter to close this window"`, so the window never closes before they've read the result.
 2. **`windows/update.sh`:** `git -C "$HOME/convert-images" pull --ff-only`, then `env/bin/pip install -r requirements.txt`; print a clear success or failure message and wait for Enter.
 3. **`setup.sh`** at the repo root, run once inside their WSL; must be safe to re-run:
    - `sudo apt update`, then `sudo apt install -y imagemagick ocrmypdf pngquant tesseract-ocr-deu tesseract-ocr-eng python3-venv git` (only the needed language packs; `tesseract-ocr-all` is huge). `sudo` asks for the coworker's WSL (Linux) password, so run setup together with them.
    - create `env/` and `pip install -r requirements.txt`
-   - self-test: generate a few small images at runtime with `magick`, or `convert` on ImageMagick 6 (don't commit binaries), run the script on them, and check that a PDF was produced with a text layer (e.g. pikepdf: every page has a `/Font` resource). End with a clear "Setup OK" or a plain error.
+   - self-test: generate a few small images at runtime with `magick`, or `convert` on ImageMagick 6 (don't commit binaries), run `pdf --jpg` on them, and check both outputs: a PDF with a text layer (e.g. pikepdf: every page has a `/Font` resource) and one JPEG per image with the sRGB profile. End with a clear "Setup OK" or a plain error. (The integration tests do the same more thoroughly, but need `requirements-dev.txt`.)
    - create the two desktop shortcuts by calling `powershell.exe` (`WScript.Shell` → `CreateShortcut`). Find the desktop with `[Environment]::GetFolderPath('Desktop')` (it may be redirected to OneDrive), and pass Windows paths to PowerShell via `wslpath -w`.
-     - "Scans to PDF": target `C:\Windows\System32\wsl.exe`, arguments `-d <distro> --cd ~ --exec /home/<user>/convert-images/windows/run.sh`
-     - "Update Scans to PDF": the same with `windows/update.sh`
+     - "Convert Scans" (name to confirm): target `C:\Windows\System32\wsl.exe`, arguments `-d <distro> --cd ~ --exec /home/<user>/convert-images/windows/run.sh`
+     - "Update Convert Scans": the same with `windows/update.sh`
      - Take `<distro>` from `$WSL_DISTRO_NAME` and the path from `$HOME`. `--exec` doesn't expand `~` in the command itself, so it must be an absolute path.
 4. **Handover on their machine** (none of the Windows side can be tested from the Mac):
    - First confirm `wsl -l -v` shows VERSION 2 and an LTS Ubuntu.
@@ -109,6 +112,7 @@ Goal: a coworker who isn't a programmer runs the script on their Windows PC thro
      - a folder name with an umlaut, a space, `&` and parentheses
      - a folder big enough to split
      - `--no-ocr`
+     - JPEG output (alone and with PDF), and one JPEG deposited in Rosetta to check its colors in the viewer
      - one deliberate failure (e.g. a corrupt `.tif`), to confirm they see the failure message
      - a mapped drive or OneDrive path, to confirm the friendly message
    - Check that their filenames sort as expected.
