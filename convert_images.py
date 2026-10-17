@@ -68,7 +68,7 @@ CONVERT_JOBS = os.cpu_count() or 1
 # --- Image size and JPEG quality, per output ---
 # *_MAX_SIZE: scale images down so neither side exceeds this many pixels (None = keep full size).
 # *_QUALITY: JPEG quality 1-100. ImageMagick halves color resolution (4:2:0) below 90.
-PDF_MAX_SIZE = None
+PDF_MAX_SIZE = 2500
 PDF_QUALITY = 75
 JPG_MAX_SIZE = 2500
 JPG_QUALITY = 85
