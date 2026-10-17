@@ -11,7 +11,7 @@ A single-file CLI (`convert_images.py`) that turns folders of scanned images (`.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt          # pikepdf, img2pdf, Pillow
-python convert_images.py pdf /path/to/images [--max-mb=100] [--ocr-lang=deu+eng] [--no-ocr] [--jpg]
+python convert_images.py pdf [--max-mb=100] [--ocr-lang=deu+eng] [--no-ocr] [--jpg] /path/to/images
 python convert_images.py jpg /path/to/images
 ```
 
@@ -90,7 +90,7 @@ Goal: a coworker who isn't a programmer runs the script on their Windows PC thro
    - Folder: use `$1` if given (dropped on the icon); otherwise open a Windows folder picker by calling `powershell.exe` from WSL (`System.Windows.Forms.FolderBrowserDialog`; set `[Console]::OutputEncoding` to UTF-8 so umlauts survive, strip the trailing `\r`, and give the dialog a topmost owner window so it doesn't open behind the console). Cancel → exit cleanly.
    - Convert with `wslpath -a`, then check the folder exists (`[ -d ]`). If not, explain in plain words: UNC paths (`\\server\share`) don't convert, and mapped drive letters (`S:\`) convert to `/mnt/s`, which doesn't exist in WSL; ask them to copy the scans to a local folder like `C:\Scans`.
    - Prompts (`read -r -p`): what to make, PDF / JPEGs / both (default to agree on with Chris; the JPEGs are the access copies for Rosetta) → `pdf`, `jpg` or `pdf --jpg`. Only when a PDF is made: max MB `[100]`, OCR languages `[deu+eng]`, recognize text `(Y/n)` → `--max-mb`, `--ocr-lang`, `--no-ocr`. Validate the MB value is a whole number and re-ask otherwise.
-   - Run `"$HOME/convert-images/env/bin/python" "$HOME/convert-images/convert_images.py" <command> "$folder" ...` with every variable quoted.
+   - Run `"$HOME/convert-images/env/bin/python" "$HOME/convert-images/convert_images.py" <command> ... "$folder"` (options first, folder last) with every variable quoted.
    - Exit code 0 → "All done." (naming what was made: PDFs in the `pdf` folders, JPEGs in the `jpg` folders); anything else → "Some folders failed. Please send Chris the newest file in the _logs folder inside <folder>." Then `read -r -p "Press Enter to close this window"`, so the window never closes before they've read the result.
 2. **`windows/update.sh`:** `git -C "$HOME/convert-images" pull --ff-only`, then `env/bin/pip install -r requirements.txt`; print a clear success or failure message and wait for Enter.
 3. **`setup.sh`** at the repo root, run once inside their WSL; must be safe to re-run:

@@ -27,7 +27,7 @@ To work on the script, install `requirements-dev.txt` instead: it includes `requ
 ## Usage
 
 ```bash
-python convert_images.py pdf <folder> [options]   # one OCR'd PDF per image folder
+python convert_images.py pdf [options] <folder>   # one OCR'd PDF per image folder
 python convert_images.py jpg <folder>             # one JPEG per image
 ```
 
@@ -43,8 +43,8 @@ Options for `pdf`:
 `jpg` has no options. Examples:
 
 ```bash
-python convert_images.py pdf /path/to/images --ocr-lang=eng --max-mb=150
-python convert_images.py pdf /path/to/images --jpg
+python convert_images.py pdf --ocr-lang=eng --max-mb=150 /path/to/images
+python convert_images.py pdf --jpg /path/to/images
 python convert_images.py jpg /path/to/images
 ```
 

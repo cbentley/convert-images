@@ -3,7 +3,7 @@
 Convert folders of images into OCR-processed, size-limited PDFs and/or JPEGs.
 
 Usage:
-    python convert_images.py pdf <folder> [options]
+    python convert_images.py pdf [options] <folder>
     python convert_images.py jpg <folder>
 
 See README.md for full documentation.
@@ -537,19 +537,22 @@ def parse_args(argv=None) -> argparse.Namespace:
         epilog="""Run "%(prog)s pdf -h" to see its options.
 
 examples:
+  %(prog)s pdf --jpg .
   %(prog)s pdf /scans
-  %(prog)s pdf /scans --jpg --max-mb 50 --ocr-lang eng
+  %(prog)s pdf --jpg --max-mb 50 --ocr-lang eng /scans
   %(prog)s jpg /scans""",
         formatter_class=argparse.RawDescriptionHelpFormatter,  # Keep the epilog's line breaks
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    folder_help = ("Folder with the scans. Subfolders are searched too, "
+                   "and each folder with images is converted on its own.")
 
     pdf_parser = subparsers.add_parser(
         "pdf",
         help="Make an OCR'd PDF per image folder, in its pdf folder",
         description="Make an OCR'd, size-limited PDF per image folder, written to a pdf folder inside it.",
     )
-    pdf_parser.add_argument("folder")
+    pdf_parser.add_argument("folder", help=folder_help)
     pdf_parser.add_argument(
         "--max-mb",
         type=int,
@@ -578,7 +581,7 @@ examples:
         help="Save each image as a JPEG, in a jpg folder inside its image folder",
         description="Save each image as a JPEG, written to a jpg folder inside its image folder.",
     )
-    jpg_parser.add_argument("folder")
+    jpg_parser.add_argument("folder", help=folder_help)
     jpg_parser.set_defaults(make_pdf=False, make_jpg=True)
 
     args = parser.parse_args(argv)
