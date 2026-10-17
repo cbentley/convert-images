@@ -217,6 +217,32 @@ def test_adobe_rgb_is_converted_to_srgb(tmp_path):
         assert expected != pytest.approx(BACKGROUND, abs=6), "test colors should change visibly"
 
 
+# --- Metadata ---
+
+@needs_ocr
+def test_metadata_is_stripped_from_pdf_pages_only(tmp_path, monkeypatch):
+    """PDF page images lose comments and EXIF/XMP/Photoshop data; standalone JPEGs keep them.
+    OCR_OPTS without --optimize keeps OCRmyPDF from re-encoding (which would also drop the metadata)."""
+    monkeypatch.setattr(ci, "OCR_OPTS", ["--optimize", "0", "--output-type", "pdf"])
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    (tmp_path / "in").mkdir()
+    with Image.open(make_image(tmp_path / "gen" / "a.tif", 600, 400, "-depth", "8")) as im:
+        im.convert("RGB").save(tmp_path / "in" / "a.jpg", exif=exif, comment=b"scan note", dpi=(300, 300))
+    assert run("pdf", str(tmp_path / "in"), "--jpg", "--no-ocr") == 0
+
+    with Image.open(tmp_path / "in" / "jpg" / "a.jpg") as im:
+        assert im.getexif().get(0x0112) == 6
+        assert im.info.get("comment") == b"scan note"
+    with pikepdf.open(tmp_path / "in" / "pdf" / "in.pdf") as pdf:
+        (image,) = pdf.pages[0].images.values()
+        data = image.read_raw_bytes()
+        assert data[:2] == b"\xff\xd8"  # Still the JPEG img2pdf embedded, not re-encoded
+        assert b"Exif\0" not in data[:65536]
+        assert b"scan note" not in data[:65536]
+        assert b"ICC_PROFILE" in data[:65536]
+
+
 # --- Resizing ---
 
 @needs_ocr

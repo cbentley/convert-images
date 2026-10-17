@@ -266,10 +266,11 @@ def strip_mismatched_icc(jpeg: bytes) -> bytes:
 
 
 def encode_jpeg(image_path: Path, info: ImageInfo, jpeg_path: Path, max_size: int | None, quality: int,
-                keep_real_size: bool) -> None:
+                keep_real_size: bool, keep_metadata: bool) -> None:
     """Encode the first image of a file as an sRGB JPEG, scaled down so neither side exceeds max_size (if set).
     With keep_real_size, the JPEG's DPI is scaled along with the pixels, so it keeps the original's real size;
-    images without a stored DPI are left without one."""
+    images without a stored DPI are left without one. Without keep_metadata, comments and all profiles except ICC
+    are removed (e.g. EXIF, XMP and Photoshop data, which ImageMagick copies from the original)."""
     scale = 1.0
     if max_size and max(info.width, info.height) > max_size:
         scale = max_size / max(info.width, info.height)
@@ -278,6 +279,7 @@ def encode_jpeg(image_path: Path, info: ImageInfo, jpeg_path: Path, max_size: in
         *IMAGEMAGICK_INPUT_OPTS,
         f"{image_path}[0]",  # First image only (multi-page TIFFs, Photoshop layers)
         "-profile", SRGB_PROFILE,  # Before -resize, so pixels are converted before resizing and encoding
+        *([] if keep_metadata else ["+profile", "!icc,*", "+set", "comment"]),
         *(["-resize", f"{max_size}x{max_size}>"] if scale < 1 else []),
         *(["-units", "PixelsPerInch", "-density", f"{info.x_dpi * scale:.4f}x{info.y_dpi * scale:.4f}"]
           if keep_real_size and info.has_dpi else []),
@@ -308,7 +310,7 @@ def convert_image(image_path: Path, page_pdf: Path | None, jpg_path: Path | None
 
     if page_pdf:
         page_jpeg = page_pdf.with_suffix(".jpg")
-        encode_jpeg(image_path, info, page_jpeg, PDF_MAX_SIZE, PDF_QUALITY, keep_real_size=False)
+        encode_jpeg(image_path, info, page_jpeg, PDF_MAX_SIZE, PDF_QUALITY, keep_real_size=False, keep_metadata=False)
         page_size = page_size_points(info)
         # Rotation.none: ignore EXIF orientation, so the page shows the pixels as stored
         page_pdf.write_bytes(img2pdf.convert(
@@ -319,7 +321,7 @@ def convert_image(image_path: Path, page_pdf: Path | None, jpg_path: Path | None
         page_jpeg.unlink()
 
     if jpg_path:
-        encode_jpeg(image_path, info, jpg_path, JPG_MAX_SIZE, JPG_QUALITY, keep_real_size=True)
+        encode_jpeg(image_path, info, jpg_path, JPG_MAX_SIZE, JPG_QUALITY, keep_real_size=True, keep_metadata=True)
 
 
 def convert_all_images(images: list[Path], single_pages_dir: Path | None, jpg_dir: Path | None) -> list[Path]:
