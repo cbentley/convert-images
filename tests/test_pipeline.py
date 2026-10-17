@@ -117,7 +117,7 @@ def mixed_run(tmp_path_factory):
     multi = folder / "p6_multi.tif"
     subprocess.run([ci.IMAGEMAGICK_CMD, str(multi), "-size", "50x50", "xc:gray", str(multi)], check=True)
 
-    # EXIF orientation 6 (rotate 90°) must be ignored: the page shows the pixels as stored
+    # EXIF orientation 6 (rotate 90° clockwise): the page must be upright, i.e. 400x740
     with Image.open(make_image(scratch / "tmp.tif", 740, 400, "-depth", "8")) as im:
         exif = Image.Exif()
         exif[0x0112] = 6
@@ -149,9 +149,10 @@ def test_mixed_run_pdf_names(mixed_run):
 def test_mixed_run_pdf_pages(mixed_run):
     _, folder, _ = mixed_run
     pages = page_info(folder / "pdf" / "b01.pdf")
-    # Natural order puts p7_exif6.jpg (740x400, 300 DPI) between p6 and p10; ruler.tif is excluded
+    # Natural order puts p7_exif6.jpg (740x400 stored, 400x740 upright, 300 DPI) between p6 and p10;
+    # ruler.tif is excluded
     expected = [(w, h, dpi) for _, w, h, _, dpi in MIXED_IMAGES]
-    expected.insert(6, (740, 400, 300))
+    expected.insert(6, (400, 740, 300))
     assert [p["pixels"] for p in pages] == [(w, h) for w, h, _ in expected]
     for page, (w, h, dpi) in zip(pages, expected):
         assert page["size"] == pytest.approx((points(w, dpi), points(h, dpi)), abs=0.01)
@@ -220,8 +221,8 @@ def test_adobe_rgb_is_converted_to_srgb(tmp_path):
 # --- Metadata ---
 
 @needs_ocr
-def test_metadata_is_stripped_from_pdf_pages_only(tmp_path, monkeypatch):
-    """PDF page images lose comments and EXIF/XMP/Photoshop data; standalone JPEGs keep them.
+def test_metadata_is_stripped(tmp_path, monkeypatch):
+    """PDF page images and JPEGs lose comments and EXIF/XMP/Photoshop data, but keep the ICC profile and DPI.
     OCR_OPTS without --optimize keeps OCRmyPDF from re-encoding (which would also drop the metadata)."""
     monkeypatch.setattr(ci, "OCR_OPTS", ["--optimize", "0", "--output-type", "pdf"])
     exif = Image.Exif()
@@ -232,8 +233,10 @@ def test_metadata_is_stripped_from_pdf_pages_only(tmp_path, monkeypatch):
     assert run("pdf", str(tmp_path / "in"), "--jpg", "--no-ocr") == 0
 
     with Image.open(tmp_path / "in" / "jpg" / "a.jpg") as im:
-        assert im.getexif().get(0x0112) == 6
-        assert im.info.get("comment") == b"scan note"
+        assert 0x0112 not in im.getexif()
+        assert "comment" not in im.info
+        assert im.info["icc_profile"] == Path(ci.SRGB_PROFILE).read_bytes()
+        assert im.info["dpi"] == pytest.approx((300, 300), abs=1)
     with pikepdf.open(tmp_path / "in" / "pdf" / "in.pdf") as pdf:
         (image,) = pdf.pages[0].images.values()
         data = image.read_raw_bytes()
@@ -241,6 +244,58 @@ def test_metadata_is_stripped_from_pdf_pages_only(tmp_path, monkeypatch):
         assert b"Exif\0" not in data[:65536]
         assert b"scan note" not in data[:65536]
         assert b"ICC_PROFILE" in data[:65536]
+
+
+# --- Orientation ---
+
+def make_marked_image(path: Path, *opts: str) -> Path:
+    """300x200 blue image with a red 60x60 square in the top-left corner of the stored pixels."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run([ci.IMAGEMAGICK_CMD, "-size", "300x200", "xc:blue", "-fill", "red", "-draw", "rectangle 0,0 59,59",
+                    "-type", "TrueColor", *opts, str(path)], check=True, capture_output=True)
+    return path
+
+
+def red_corner(im: Image.Image) -> str:
+    """Which corner of the image is red."""
+    w, h = im.size
+    corners = {"top-left": (10, 10), "top-right": (w - 11, 10), "bottom-left": (10, h - 11),
+               "bottom-right": (w - 11, h - 11)}
+    red = [name for name, xy in corners.items() if im.convert("RGB").getpixel(xy)[0] > 200]
+    assert len(red) == 1, red
+    return red[0]
+
+
+# (ImageMagick orientation, upright size, corner the stored top-left ends up in)
+ORIENTATIONS = [
+    ("TopLeft", (300, 200), "top-left"),          # As stored
+    ("TopRight", (300, 200), "top-right"),        # Mirrored horizontally
+    ("BottomRight", (300, 200), "bottom-right"),  # Rotated 180°
+    ("RightTop", (200, 300), "top-right"),        # Rotated 90° clockwise (EXIF 6)
+    ("LeftBottom", (200, 300), "bottom-left"),    # Rotated 90° counter-clockwise (EXIF 8)
+]
+
+
+@needs_ocr
+@pytest.mark.parametrize("orientation, size, corner", ORIENTATIONS)
+def test_orientation_tag_is_applied(tmp_path, orientation, size, corner):
+    # Stored 300x200 at 300x150 DPI: 1 x 1.333 inches, so 1.333 x 1 inches when turned by 90°
+    make_marked_image(tmp_path / "in" / "a.tif", "-units", "PixelsPerInch", "-density", "300x150",
+                      "-orient", orientation)
+    assert run("pdf", str(tmp_path / "in"), "--jpg", "--no-ocr") == 0
+
+    turned = size == (200, 300)
+    with Image.open(tmp_path / "in" / "jpg" / "a.jpg") as im:
+        assert im.size == size
+        assert red_corner(im) == corner
+        assert im.info["dpi"] == pytest.approx((150, 300) if turned else (300, 150), abs=1)
+    (page,) = page_info(tmp_path / "in" / "pdf" / "in.pdf")
+    assert page["pixels"] == size
+    assert page["rotate"] == 0
+    assert page["size"] == pytest.approx((96, 72) if turned else (72, 96), abs=0.01)
+    with pikepdf.open(tmp_path / "in" / "pdf" / "in.pdf") as pdf:
+        (image,) = pdf.pages[0].images.values()
+        assert red_corner(pikepdf.PdfImage(image).as_pil_image()) == corner
 
 
 # --- Resizing ---

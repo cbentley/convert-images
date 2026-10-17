@@ -60,7 +60,7 @@ Output goes into folders inside each image folder, overwriting files with the sa
 - `pdf/<foldername>.pdf`, or `pdf/<foldername>-part01.pdf`, `-part02.pdf`, … when it exceeds `--max-mb`. A folder named `master` (case-insensitive) takes its parent's name: `b01-f01/master/` → `b01-f01/master/pdf/b01-f01.pdf`.
 - `jpg/<imagename>.jpg`, one per image. If two images would get the same JPEG name (e.g. `a.tif` and `a.jpg`), the folder fails rather than one overwriting the other.
 
-Images are converted to sRGB and keep the scanned object's real size: PDF pages are sized from each original's pixels and DPI, and JPEGs that are scaled down get a correspondingly lower DPI. Image size and JPEG quality are set separately for PDF pages and JPEGs (see Configuration). For files holding several images (multi-page TIFFs, Photoshop layers), only the first is used, with a warning in the log.
+Images are converted to sRGB and keep the scanned object's real size: PDF pages are sized from each original's pixels and DPI, and JPEGs that are scaled down get a correspondingly lower DPI. Image size and JPEG quality are set separately for PDF pages and JPEGs (see Configuration). For files holding several images (multi-page TIFFs, Photoshop layers), only the first is used, with a warning in the log. Images with an orientation tag (e.g. a camera's "rotate 90°") are rotated or flipped so they're upright in the output. Metadata from the originals (EXIF, XMP, Photoshop data, comments) is not carried over, only the color profile and DPI.
 
 A log of each run is written to `<folder>/_logs/<timestamp>_log.txt`.
 

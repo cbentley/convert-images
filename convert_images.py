@@ -210,9 +210,12 @@ def check_jpg_name_clashes(images: list[Path]) -> None:
 
 # ICC profile color space (header bytes 16-20) expected for each JPEG mode
 ICC_COLOR_SPACES = {"L": b"GRAY", "RGB": b"RGB ", "CMYK": b"CMYK"}
+# Orientation tags (as ImageMagick names them) that display the image turned by 90°, so width and height swap
+ROTATED_ORIENTATIONS = {"LeftTop", "RightTop", "RightBottom", "LeftBottom"}
 
 
 class ImageInfo(NamedTuple):
+    """Size and DPI as displayed, i.e. after applying the file's orientation tag (as -auto-orient does)."""
     width: int
     height: int
     x_dpi: float
@@ -224,23 +227,26 @@ class ImageInfo(NamedTuple):
 def read_image_info(image_path: Path) -> ImageInfo:
     """Read size and DPI of the first image in a file from its header (-ping doesn't decode pixels).
     IMAGEMAGICK_INPUT_OPTS apply, so an uncommented -density overrides the stored DPI.
-    ImageMagick reports 72 DPI with units "Undefined" when the file stores no DPI."""
+    ImageMagick reports 72 DPI with units "Undefined" when the file stores no DPI.
+    For images whose orientation tag turns them by 90°, width/height and x/y DPI are swapped."""
     cmd = [
         IMAGEMAGICK_CMD,
         *IMAGEMAGICK_INPUT_OPTS,
         "-ping",
         str(image_path),
-        "-format", "%w %h %x %y %U\n",  # One line per image in the file
+        "-format", "%w %h %x %y %U %[orientation]\n",  # One line per image in the file
         "info:",
     ]
     result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     lines = result.stdout.splitlines()
-    width, height, x_dpi, y_dpi, units = lines[0].split()
-    x_dpi, y_dpi = float(x_dpi), float(y_dpi)
+    width, height, x_dpi, y_dpi, units, orientation = lines[0].split()
+    width, height, x_dpi, y_dpi = int(width), int(height), float(x_dpi), float(y_dpi)
     if units == "PixelsPerCentimeter":
         x_dpi, y_dpi = x_dpi * 2.54, y_dpi * 2.54
+    if orientation in ROTATED_ORIENTATIONS:
+        width, height, x_dpi, y_dpi = height, width, y_dpi, x_dpi
     has_dpi = units in ("PixelsPerInch", "PixelsPerCentimeter") and x_dpi > 0 and y_dpi > 0
-    return ImageInfo(int(width), int(height), x_dpi, y_dpi, has_dpi, len(lines))
+    return ImageInfo(width, height, x_dpi, y_dpi, has_dpi, len(lines))
 
 
 def strip_mismatched_icc(jpeg: bytes) -> bytes:
@@ -266,11 +272,14 @@ def strip_mismatched_icc(jpeg: bytes) -> bytes:
 
 
 def encode_jpeg(image_path: Path, info: ImageInfo, jpeg_path: Path, max_size: int | None, quality: int,
-                keep_real_size: bool, keep_metadata: bool) -> None:
-    """Encode the first image of a file as an sRGB JPEG, scaled down so neither side exceeds max_size (if set).
+                keep_real_size: bool) -> None:
+    """Encode the first image of a file as an upright sRGB JPEG, scaled down so neither side exceeds max_size
+    (if set). info must come from read_image_info, so it describes the image after -auto-orient.
     With keep_real_size, the JPEG's DPI is scaled along with the pixels, so it keeps the original's real size;
-    images without a stored DPI are left without one. Without keep_metadata, comments and all profiles except ICC
-    are removed (e.g. EXIF, XMP and Photoshop data, which ImageMagick copies from the original)."""
+    images without a stored DPI are left without one.
+    Comments and all profiles except ICC are removed (e.g. EXIF, XMP and Photoshop data, which ImageMagick copies
+    from the original): they make every file larger and nothing here uses them. The orientation tag is applied
+    first (-auto-orient), so the image stays upright without it."""
     scale = 1.0
     if max_size and max(info.width, info.height) > max_size:
         scale = max_size / max(info.width, info.height)
@@ -278,8 +287,9 @@ def encode_jpeg(image_path: Path, info: ImageInfo, jpeg_path: Path, max_size: in
         IMAGEMAGICK_CMD,
         *IMAGEMAGICK_INPUT_OPTS,
         f"{image_path}[0]",  # First image only (multi-page TIFFs, Photoshop layers)
+        "-auto-orient",  # Rotate/flip the pixels as the orientation tag says, so the output needs no tag
         "-profile", SRGB_PROFILE,  # Before -resize, so pixels are converted before resizing and encoding
-        *([] if keep_metadata else ["+profile", "!icc,*", "+set", "comment"]),
+        "+profile", "!icc,*", "+set", "comment",
         *(["-resize", f"{max_size}x{max_size}>"] if scale < 1 else []),
         *(["-units", "PixelsPerInch", "-density", f"{info.x_dpi * scale:.4f}x{info.y_dpi * scale:.4f}"]
           if keep_real_size and info.has_dpi else []),
@@ -310,9 +320,9 @@ def convert_image(image_path: Path, page_pdf: Path | None, jpg_path: Path | None
 
     if page_pdf:
         page_jpeg = page_pdf.with_suffix(".jpg")
-        encode_jpeg(image_path, info, page_jpeg, PDF_MAX_SIZE, PDF_QUALITY, keep_real_size=False, keep_metadata=False)
+        encode_jpeg(image_path, info, page_jpeg, PDF_MAX_SIZE, PDF_QUALITY, keep_real_size=False)
         page_size = page_size_points(info)
-        # Rotation.none: ignore EXIF orientation, so the page shows the pixels as stored
+        # The JPEG is already upright (-auto-orient) and has no EXIF; Rotation.none keeps img2pdf from rotating it
         page_pdf.write_bytes(img2pdf.convert(
             page_jpeg.read_bytes(),
             rotation=img2pdf.Rotation.none,
@@ -321,7 +331,7 @@ def convert_image(image_path: Path, page_pdf: Path | None, jpg_path: Path | None
         page_jpeg.unlink()
 
     if jpg_path:
-        encode_jpeg(image_path, info, jpg_path, JPG_MAX_SIZE, JPG_QUALITY, keep_real_size=True, keep_metadata=True)
+        encode_jpeg(image_path, info, jpg_path, JPG_MAX_SIZE, JPG_QUALITY, keep_real_size=True)
 
 
 def convert_all_images(images: list[Path], single_pages_dir: Path | None, jpg_dir: Path | None) -> list[Path]:
