@@ -4,11 +4,11 @@ Converts folders of scanned images into searchable, size-limited PDFs and/or JPE
 
 ## Setup
 
-Requires ImageMagick, an sRGB ICC profile (see `SRGB_PROFILE`) and, for PDFs, OCRmyPDF (with Ghostscript, Tesseract language packs and `pngquant`, which `--optimize 2` and `3` need):
+Requires ImageMagick and, for PDFs, OCRmyPDF (with Ghostscript, Tesseract language packs and `pngquant`, which `--optimize 2` and `3` need):
 
 ```bash
 # Ubuntu
-sudo apt update && sudo apt install -y imagemagick ocrmypdf pngquant tesseract-ocr-all icc-profiles-free
+sudo apt update && sudo apt install -y imagemagick ocrmypdf pngquant tesseract-ocr-all
 
 # macOS
 brew install imagemagick ghostscript ocrmypdf tesseract-lang
@@ -60,7 +60,7 @@ Output goes into folders inside each image folder, overwriting files with the sa
 - `pdf/<foldername>.pdf`, or `pdf/<foldername>-part01.pdf`, `-part02.pdf`, … when it exceeds `--max-mb`. A folder named `master` (case-insensitive) takes its parent's name: `b01-f01/master/` → `b01-f01/master/pdf/b01-f01.pdf`.
 - `jpg/<imagename>.jpg`, one per image. If two images would get the same JPEG name (e.g. `a.tif` and `a.jpg`), the folder fails rather than one overwriting the other.
 
-Images are converted to sRGB and keep the scanned object's real size: PDF pages are sized from each original's pixels and DPI, and JPEGs that are scaled down get a correspondingly lower DPI. Image size and JPEG quality are set separately for PDF pages and JPEGs (see Configuration). For files holding several images (multi-page TIFFs, Photoshop layers), only the first is used, with a warning in the log. Images with an orientation tag (e.g. a camera's "rotate 90°") are rotated or flipped so they're upright in the output. Metadata from the originals (EXIF, XMP, Photoshop data, comments) is not carried over, only the color profile and DPI.
+Images are converted to sRGB and keep the scanned object's real size: PDF pages are sized from each original's pixels and DPI, and JPEGs that are scaled down get a correspondingly lower DPI. Image size and JPEG quality are set separately for PDF pages and JPEGs (see Configuration). For files holding several images (multi-page TIFFs, Photoshop layers), only the first is used, with a warning in the log. Images with an orientation tag (e.g. a camera's "rotate 90°") are rotated or flipped so they're upright in the output. Metadata from the originals (EXIF, XMP, Photoshop data, comments) is not carried over, only the DPI; images are tagged with a compact sRGB profile. JPEGs are progressive, so web viewers can show a rough version while they load.
 
 A log of each run is written to `<folder>/_logs/<timestamp>_log.txt`.
 
@@ -89,7 +89,7 @@ python -m pytest                       # all tests
 python -m pytest -m "not integration"  # skip the tests that run ImageMagick and OCRmyPDF
 ```
 
-Needs `requirements-dev.txt` (see Setup). The integration tests generate their own small images and are skipped if ImageMagick, the sRGB profile, OCRmyPDF or Tesseract's English data is missing.
+Needs `requirements-dev.txt` (see Setup). The integration tests generate their own small images and are skipped if ImageMagick, OCRmyPDF or Tesseract's English data is missing; the Adobe RGB test also needs `icc-profiles-free` (Ubuntu) for its test profile.
 
 ## Configuration
 
@@ -104,7 +104,7 @@ Other settings are constants at the top of `convert_images.py`:
 | `IMAGEMAGICK_CMD`         | ImageMagick command (default: `magick` if installed, i.e. version 7, else `convert`) |
 | `IMAGEMAGICK_INPUT_OPTS`  | ImageMagick options before the input file (e.g. `-density`, commented out so output keeps each scan's real size) |
 | `FALLBACK_DPI`            | DPI assumed for PDF page size when an image doesn't store one         |
-| `SRGB_PROFILE`            | Path to the sRGB ICC profile images are converted to                  |
+| `SRGB_PROFILE`            | sRGB ICC profile images are converted to and tagged with (default: the compact `profiles/sRGB-v2-micro.icc` in this repo, 456 bytes, [CC0](https://github.com/saucecontrol/Compact-ICC-Profiles)) |
 | `CONVERT_JOBS`            | Images converted in parallel (default: CPU count; lower if memory runs out) |
 | `PDF_MAX_SIZE`, `JPG_MAX_SIZE` | Longest side in pixels for PDF page images and JPEGs (`None` keeps full size) |
 | `PDF_QUALITY`, `JPG_QUALITY` | JPEG quality for PDF page images and JPEGs (below 90, color resolution is halved) |

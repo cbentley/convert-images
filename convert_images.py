@@ -56,10 +56,12 @@ IMAGEMAGICK_INPUT_OPTS = [
 ]
 # DPI assumed for PDF page size when an image doesn't store one and -density is not set
 FALLBACK_DPI = 300
-# sRGB ICC profile. Images with an embedded profile (e.g. Adobe RGB) are converted to sRGB;
-# untagged RGB images are tagged as sRGB without changing pixels; untagged gray/CMYK are left as is.
-# Ubuntu: from the icc-profiles-free package. macOS: "/System/Library/ColorSync/Profiles/sRGB Profile.icc"
-SRGB_PROFILE = "/usr/share/color/icc/sRGB.icc"
+# sRGB ICC profile, used for color conversion and embedded in every output. Images with an embedded profile
+# (e.g. Adobe RGB) are converted to sRGB; untagged RGB images are tagged as sRGB without changing pixels;
+# untagged gray/CMYK are left as is. A compact sRGB profile (456 bytes instead of ~7 KB per JPEG and PDF page;
+# CC0, from https://github.com/saucecontrol/Compact-ICC-Profiles), kept in the repo so it's the same everywhere.
+# Converting with it differs from the standard sRGB.icc by at most 1 level of 255 on the sample scans.
+SRGB_PROFILE = str(Path(__file__).resolve().parent / "profiles" / "sRGB-v2-micro.icc")
 # Number of images converted in parallel. Lower it if large TIFFs exhaust memory.
 CONVERT_JOBS = os.cpu_count() or 1
 
@@ -68,8 +70,8 @@ CONVERT_JOBS = os.cpu_count() or 1
 # *_QUALITY: JPEG quality 1-100. ImageMagick halves color resolution (4:2:0) below 90.
 PDF_MAX_SIZE = None
 PDF_QUALITY = 75
-JPG_MAX_SIZE = None
-JPG_QUALITY = 90
+JPG_MAX_SIZE = 2500
+JPG_QUALITY = 85
 
 # --- OCRmyPDF ---
 OCR_CMD = "ocrmypdf"
@@ -272,14 +274,14 @@ def strip_mismatched_icc(jpeg: bytes) -> bytes:
 
 
 def encode_jpeg(image_path: Path, info: ImageInfo, jpeg_path: Path, max_size: int | None, quality: int,
-                keep_real_size: bool) -> None:
+                standalone: bool) -> None:
     """Encode the first image of a file as an upright sRGB JPEG, scaled down so neither side exceeds max_size
     (if set). info must come from read_image_info, so it describes the image after -auto-orient.
-    With keep_real_size, the JPEG's DPI is scaled along with the pixels, so it keeps the original's real size;
-    images without a stored DPI are left without one.
-    Comments and all profiles except ICC are removed (e.g. EXIF, XMP and Photoshop data, which ImageMagick copies
-    from the original): they make every file larger and nothing here uses them. The orientation tag is applied
-    first (-auto-orient), so the image stays upright without it."""
+    Standalone JPEGs (not PDF pages) are progressive, for faster display on the web, and their DPI is scaled
+    along with the pixels, so they keep the original's real size; images without a stored DPI are left without one.
+    Comments and all profiles except the sRGB one are removed (e.g. EXIF, XMP and Photoshop data, which ImageMagick
+    copies from the original): they make every file larger and nothing here uses them. The orientation tag is
+    applied first (-auto-orient), so the image stays upright without it."""
     scale = 1.0
     if max_size and max(info.width, info.height) > max_size:
         scale = max_size / max(info.width, info.height)
@@ -289,10 +291,11 @@ def encode_jpeg(image_path: Path, info: ImageInfo, jpeg_path: Path, max_size: in
         f"{image_path}[0]",  # First image only (multi-page TIFFs, Photoshop layers)
         "-auto-orient",  # Rotate/flip the pixels as the orientation tag says, so the output needs no tag
         "-profile", SRGB_PROFILE,  # Before -resize, so pixels are converted before resizing and encoding
-        "+profile", "!icc,*", "+set", "comment",
+        "+profile", "!icc,*", "+set", "comment",  # Remove all profiles except ICC (now sRGB), and comments
         *(["-resize", f"{max_size}x{max_size}>"] if scale < 1 else []),
         *(["-units", "PixelsPerInch", "-density", f"{info.x_dpi * scale:.4f}x{info.y_dpi * scale:.4f}"]
-          if keep_real_size and info.has_dpi else []),
+          if standalone and info.has_dpi else []),
+        *(["-interlace", "JPEG"] if standalone else []),  # Progressive
         "-quality", str(quality),
         str(jpeg_path),
     ]
@@ -320,7 +323,7 @@ def convert_image(image_path: Path, page_pdf: Path | None, jpg_path: Path | None
 
     if page_pdf:
         page_jpeg = page_pdf.with_suffix(".jpg")
-        encode_jpeg(image_path, info, page_jpeg, PDF_MAX_SIZE, PDF_QUALITY, keep_real_size=False)
+        encode_jpeg(image_path, info, page_jpeg, PDF_MAX_SIZE, PDF_QUALITY, standalone=False)
         page_size = page_size_points(info)
         # The JPEG is already upright (-auto-orient) and has no EXIF; Rotation.none keeps img2pdf from rotating it
         page_pdf.write_bytes(img2pdf.convert(
@@ -331,7 +334,7 @@ def convert_image(image_path: Path, page_pdf: Path | None, jpg_path: Path | None
         page_jpeg.unlink()
 
     if jpg_path:
-        encode_jpeg(image_path, info, jpg_path, JPG_MAX_SIZE, JPG_QUALITY, keep_real_size=True)
+        encode_jpeg(image_path, info, jpg_path, JPG_MAX_SIZE, JPG_QUALITY, standalone=True)
 
 
 def convert_all_images(images: list[Path], single_pages_dir: Path | None, jpg_dir: Path | None) -> list[Path]:

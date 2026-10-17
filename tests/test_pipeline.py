@@ -1,5 +1,6 @@
 """End-to-end tests: run main() on images generated with ImageMagick and check the PDFs and JPEGs.
 Skipped if ImageMagick, the sRGB profile, OCRmyPDF or Tesseract's English data is missing."""
+import io
 import shutil
 import subprocess
 from pathlib import Path
@@ -222,7 +223,8 @@ def test_adobe_rgb_is_converted_to_srgb(tmp_path):
 
 @needs_ocr
 def test_metadata_is_stripped(tmp_path, monkeypatch):
-    """PDF page images and JPEGs lose comments and EXIF/XMP/Photoshop data, but keep the ICC profile and DPI.
+    """PDF page images and JPEGs lose comments and EXIF/XMP/Photoshop data, and are tagged with the compact sRGB
+    profile; JPEGs keep their DPI and are progressive, PDF page images aren't.
     OCR_OPTS without --optimize keeps OCRmyPDF from re-encoding (which would also drop the metadata)."""
     monkeypatch.setattr(ci, "OCR_OPTS", ["--optimize", "0", "--output-type", "pdf"])
     exif = Image.Exif()
@@ -237,12 +239,16 @@ def test_metadata_is_stripped(tmp_path, monkeypatch):
         assert "comment" not in im.info
         assert im.info["icc_profile"] == Path(ci.SRGB_PROFILE).read_bytes()
         assert im.info["dpi"] == pytest.approx((300, 300), abs=1)
+        assert im.info.get("progressive")
     with pikepdf.open(tmp_path / "in" / "pdf" / "in.pdf") as pdf:
         (image,) = pdf.pages[0].images.values()
         data = image.read_raw_bytes()
         assert data[:2] == b"\xff\xd8"  # Still the JPEG img2pdf embedded, not re-encoded
         assert b"Exif\0" not in data[:65536]
         assert b"scan note" not in data[:65536]
+        with Image.open(io.BytesIO(data)) as page_jpeg:
+            assert page_jpeg.info["icc_profile"] == Path(ci.SRGB_PROFILE).read_bytes()
+            assert not page_jpeg.info.get("progressive")  # Baseline: progressive only helps on the web
         assert b"ICC_PROFILE" in data[:65536]
 
 
