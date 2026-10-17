@@ -133,9 +133,8 @@ def test_parse_args_no_ocr_leaves_language_unset(tmp_path):
     assert ci.parse_args(["pdf", str(tmp_path), "--no-ocr", "--ocr-lang", "fra"]).ocr_lang == "fra"
 
 
-@pytest.mark.parametrize("command", ["jpg", "jpeg"])
-def test_parse_args_jpg(tmp_path, command):
-    args = ci.parse_args([command, str(tmp_path)])
+def test_parse_args_jpg(tmp_path):
+    args = ci.parse_args(["jpg", str(tmp_path)])
     assert (args.make_pdf, args.make_jpg) == (False, True)
 
 
@@ -143,6 +142,8 @@ def test_parse_args_jpg(tmp_path, command):
     ["pdf", "/does/not/exist"],
     ["pdf", ".", "--max-mb", "big"],
     ["jpg", ".", "--max-mb", "5"],
+    ["jpeg", "."],
+    ["pdf", ".", "--jpeg"],
     [],
 ])
 def test_parse_args_errors_exit_with_code_2(argv):

@@ -520,7 +520,14 @@ def split_pdf_by_size(input_pdf: Path, output_dir: Path, max_mb: int) -> list[Pa
 def parse_args(argv=None) -> argparse.Namespace:
     """Parse the command line. Sets make_pdf and make_jpg for either subcommand; exits if the folder doesn't exist."""
     parser = argparse.ArgumentParser(
-        description="Convert folders of scanned images to OCR'd PDFs and/or JPEGs."
+        description="Convert folders of scanned images to OCR'd PDFs and/or JPEGs.",
+        epilog="""Run "%(prog)s pdf -h" to see its options.
+
+examples:
+  %(prog)s pdf /scans
+  %(prog)s pdf /scans --jpg --max-mb 50 --ocr-lang eng
+  %(prog)s jpg /scans""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,  # Keep the epilog's line breaks
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -538,7 +545,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     pdf_parser.add_argument(
         "--ocr-lang",
-        help=f'Languages to use for OCR. Examples: "eng", "deu", "eng+deu". Default: {DEFAULT_OCR_LANG}'
+        help=f'Languages to use for OCR. Examples: "eng", "deu", "deu+eng". Default: {DEFAULT_OCR_LANG}'
     )
     pdf_parser.add_argument(
         "--no-ocr",
@@ -555,7 +562,6 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     jpg_parser = subparsers.add_parser(
         "jpg",
-        aliases=["jpeg"],
         help="Save each image as a JPEG, in a jpg folder inside its image folder",
         description="Save each image as a JPEG, written to a jpg folder inside its image folder.",
     )
