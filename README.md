@@ -111,4 +111,4 @@ Other settings are constants at the top of `convert_images.py`:
 | `DEFAULT_OCR_LANG`        | OCR languages used when `--ocr-lang` isn't given                      |
 | `OCR_OPTS`                | OCRmyPDF options (language comes from `--ocr-lang`)                   |
 
-These OCRmyPDF options re-encode every page image, adding a second lossy compression: `--optimize 2` or `3`, `--deskew`, and PDF/A output (the default if `--output-type pdf` is removed). `--rotate-pages` is lossless.
+These OCRmyPDF options re-encode every page image, adding a second lossy compression: `--optimize 2` or `3` and `--deskew`. `--rotate-pages` is lossless.

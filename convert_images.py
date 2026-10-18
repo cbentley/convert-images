@@ -81,7 +81,7 @@ OCR_OPTS = [
     "--optimize", "3",  # Select 3 for general use, 1 for higher quality (and larger files). 2 and 3 re-encode page images.
     #"--deskew",  # Re-encodes page images
     #"--rotate-pages",  # Use for text; lossless (only sets page rotation)
-    "--output-type", "pdf",  # Plain PDF; the default (PDF/A) re-encodes page images
+    "--output-type", "pdf",
 ]
 
 # ============================================================
