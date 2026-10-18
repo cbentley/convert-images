@@ -36,7 +36,7 @@ Options for `pdf`:
 | Option              | Description                                                    | Default   |
 | ------------------- | -------------------------------------------------------------- | --------- |
 | `--max-mb=<size>`   | Maximum size of each final PDF in MB; larger output is split   | `100`     |
-| `--ocr-lang=<lang>` | OCR languages, passed to OCRmyPDF `-l` (e.g. `eng`, `deu+eng`) | `deu+eng` |
+| `--ocr-lang=<lang>` | OCR languages, passed to OCRmyPDF `-l` (e.g. `eng`, `deu+eng`) | `DEFAULT_OCR_LANG` |
 | `--no-ocr`          | Skip text recognition (`--ocr-lang` is ignored); OCRmyPDF still applies `OCR_OPTS` | off |
 | `--jpg`             | Also save each image as a JPEG, as `jpg` does                  | off       |
 
@@ -60,7 +60,7 @@ PDFs and JPEGs both go into an `access` folder inside each image folder, overwri
 - `<foldername>.pdf`, or `<foldername>-part01.pdf`, `-part02.pdf`, … when it exceeds `--max-mb`.
 - `<imagename>.jpg`, one per image. If two images would get the same JPEG name (e.g. `a.tif` and `a.jpg`), the folder fails rather than one overwriting the other.
 
-Images are converted to sRGB and keep the scanned object's real size: PDF pages are sized from each original's pixels and DPI, and JPEGs that are scaled down get a correspondingly lower DPI. Image size and JPEG quality are set separately for PDF pages and JPEGs (see Configuration). For files holding several images (multi-page TIFFs, Photoshop layers), only the first is used, with a warning in the log. Images with an orientation tag (e.g. a camera's "rotate 90°") are rotated or flipped so they're upright in the output. Metadata from the originals (EXIF, XMP, Photoshop data, comments) is not carried over, only the DPI; images are tagged with a compact sRGB profile. JPEGs are progressive, so web viewers can show a rough version while they load.
+Images with an embedded color profile are converted to sRGB, untagged RGB images are tagged as sRGB, and untagged gray and CMYK images are left as is. All images keep the scanned object's real size: PDF pages are sized from each original's pixels and DPI, and JPEGs that are scaled down get a correspondingly lower DPI. Image size and JPEG quality are set separately for PDF pages and JPEGs (see Configuration). For files holding several images (multi-page TIFFs, Photoshop layers), only the first is used, with a warning in the log. Images with an orientation tag (e.g. a camera's "rotate 90°") are rotated or flipped so they're upright in the output. Metadata from the originals (EXIF, XMP, Photoshop data, comments) is not carried over, only the DPI and, for sRGB images, a compact sRGB profile. JPEGs are progressive, so web viewers can show a rough version while they load.
 
 A log of each run is written to `<folder>/_logs/<timestamp>_log.txt`.
 
@@ -93,22 +93,22 @@ Needs `requirements-dev.txt` (see Setup). The integration tests generate their o
 
 ## Configuration
 
-Other settings are constants at the top of `convert_images.py`:
+Settings that aren't command-line options are constants at the top of `convert_images.py`:
 
 | Constant                  | Controls                                                              |
 | ------------------------- | --------------------------------------------------------------------- |
-| `ALLOWED_EXT`             | Image file extensions to process                                      |
-| `EXCLUDED_WORDS`          | Filename words that cause an image to be skipped                      |
-| `GENERIC_FOLDER_NAMES`    | Folder names that take their PDF name from the parent folder and get their `access` folder next to them |
-| `ACCESS_DIR_NAME`         | Name of the output folder                                             |
-| `IMAGEMAGICK_CMD`         | ImageMagick command (default: `magick` if installed, i.e. version 7, else `convert`) |
-| `IMAGEMAGICK_INPUT_OPTS`  | ImageMagick options before the input file (e.g. `-density`, commented out so output keeps each scan's real size) |
-| `FALLBACK_DPI`            | DPI assumed for PDF page size when an image doesn't store one         |
-| `SRGB_PROFILE`            | sRGB ICC profile images are converted to and tagged with (default: the compact `profiles/sRGB-v2-micro.icc` in this repo, 456 bytes, [CC0](https://github.com/saucecontrol/Compact-ICC-Profiles)) |
-| `CONVERT_JOBS`            | Images converted in parallel (default: CPU count; lower if memory runs out) |
-| `PDF_MAX_SIZE`, `JPG_MAX_SIZE` | Longest side in pixels for PDF page images and JPEGs (`None` keeps full size) |
-| `PDF_QUALITY`, `JPG_QUALITY` | JPEG quality for PDF page images and JPEGs (below 90, color resolution is halved) |
+| `ALLOWED_EXT`             | Image file extensions to process (lowercase, with the dot; files match regardless of case) |
+| `EXCLUDED_WORDS`          | Images whose filename contains any of these are skipped. Matched anywhere in the name and ignoring case, so `ruler` also skips `Rulers_01.tif`. Lowercase. |
+| `GENERIC_FOLDER_NAMES`    | Folder names that take their PDF name from the parent folder and get their `access` folder next to them. Lowercase. |
+| `ACCESS_DIR_NAME`         | Name of the output folder. Folders with this name are never searched for images. |
+| `IMAGEMAGICK_CMD`, `OCR_CMD` | ImageMagick and OCRmyPDF commands. `IMAGEMAGICK_CMD` is picked automatically: `magick` on ImageMagick 7, `convert` on 6. |
+| `IMAGEMAGICK_INPUT_OPTS`  | ImageMagick options placed before each input file. Keep `-limit thread 1`: `CONVERT_JOBS` already runs one ImageMagick per core. Uncommenting `-density` treats every image as that DPI instead of the one it stores, which changes the PDF page size and the JPEGs' DPI. |
+| `FALLBACK_DPI`            | DPI used for the PDF page size of images that don't store one (their JPEGs stay without a DPI) |
+| `SRGB_PROFILE`            | sRGB ICC profile: images with an embedded profile are converted to it, untagged RGB images are tagged with it, untagged gray and CMYK images are left as is. Default: `profiles/sRGB-v2-micro.icc`, a compact [CC0](https://github.com/saucecontrol/Compact-ICC-Profiles) profile in this repo. |
+| `CONVERT_JOBS`            | Images converted in parallel (default: the number of CPU cores; lower it if large TIFFs run out of memory) |
+| `PDF_MAX_SIZE`, `JPG_MAX_SIZE` | Longest side in pixels for PDF page images and JPEGs. Larger images are scaled down, smaller ones are left as is; `None` keeps full size. PDF pages keep the original's real size either way. |
+| `PDF_QUALITY`, `JPG_QUALITY` | JPEG quality (1-100) for PDF page images and JPEGs. Below 90, ImageMagick stores color at half the resolution in each direction (4:2:0). |
 | `DEFAULT_OCR_LANG`        | OCR languages used when `--ocr-lang` isn't given                      |
-| `OCR_OPTS`                | OCRmyPDF options (language comes from `--ocr-lang`)                   |
+| `OCR_OPTS`                | OCRmyPDF options, also applied with `--no-ocr` (languages come from `--ocr-lang`) |
 
-These OCRmyPDF options re-encode every page image, adding a second lossy compression: `--optimize 2` or `3` and `--deskew`. `--rotate-pages` is lossless.
+These OCRmyPDF options re-encode every page image after `PDF_QUALITY`'s encoding, adding a second lossy compression: `--optimize 2` or `3` and `--deskew`. `--rotate-pages` is lossless.
