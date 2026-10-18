@@ -398,6 +398,20 @@ def test_shared_output_folder_fails_both_folders_and_keeps_outputs(tmp_path):
 
 
 @needs_ocr
+def test_rerun_removes_stale_pdfs_and_keeps_others(tmp_path):
+    make_image(tmp_path / "a.tif")
+    pdf_dir = tmp_path / "access"
+    pdf_dir.mkdir()
+    for name in (f"{tmp_path.name}-part01.pdf", f"{tmp_path.name}-part02.pdf", "unrelated.pdf"):
+        (pdf_dir / name).write_bytes(b"old")  # From an earlier run that was split
+
+    assert run("pdf", str(tmp_path), "--no-ocr") == 0
+    assert sorted(p.name for p in pdf_dir.iterdir()) == [f"{tmp_path.name}.pdf", "unrelated.pdf"]
+    assert len(page_info(pdf_dir / f"{tmp_path.name}.pdf")) == 1
+    assert "Removed PDF from an earlier run" in log_text(tmp_path)
+
+
+@needs_ocr
 def test_name_clash_fails_folder_and_removes_split_pdfs(tmp_path):
     make_image(tmp_path / "a.tif")
     make_image(tmp_path / "a.jpg")

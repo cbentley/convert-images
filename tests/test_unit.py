@@ -188,3 +188,23 @@ def test_remove_part_pdfs_removes_only_this_folders_parts(tmp_path):
     touch(tmp_path, "b01-part01.pdf", "b01-part02.pdf", "b01.pdf", "b02-part01.pdf")
     ci.remove_part_pdfs(tmp_path, "b01")
     assert sorted(p.name for p in tmp_path.iterdir()) == ["b01.pdf", "b02-part01.pdf"]
+
+
+def test_own_pdfs_matches_names_literally(tmp_path):
+    touch(tmp_path, "b[1].pdf", "b[1]-part01.pdf", "b1.pdf", "b[1]-part-notes.pdf", "b[1]-part01.jpg")
+    assert [p.name for p in ci.own_pdfs(tmp_path, "b[1]")] == ["b[1]-part01.pdf", "b[1].pdf"]
+    assert [p.name for p in ci.own_pdfs(tmp_path, "b[1]", parts_only=True)] == ["b[1]-part01.pdf"]
+    assert ci.own_pdfs(tmp_path / "missing", "b[1]") == []
+
+
+@pytest.mark.parametrize("old, new, kept", [
+    (["b01-part01.pdf", "b01-part02.pdf", "b01-part03.pdf"], ["b01-part01.pdf", "b01-part02.pdf"],
+     ["b01-part01.pdf", "b01-part02.pdf"]),
+    (["b01-part01.pdf", "b01-part02.pdf"], ["b01.pdf"], []),
+    (["b01.pdf"], ["b01-part01.pdf", "b01-part02.pdf"], []),
+])
+def test_remove_stale_pdfs_removes_only_what_wont_be_replaced(tmp_path, old, new, kept):
+    dest = tmp_path / "dest"
+    touch(dest, *old, "b02.pdf", "notes.pdf")
+    ci.remove_stale_pdfs(dest, "b01", [tmp_path / "work" / name for name in new])
+    assert sorted(p.name for p in dest.iterdir()) == sorted(kept + ["b02.pdf", "notes.pdf"])

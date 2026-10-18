@@ -56,7 +56,7 @@ Skipped:
 - folders whose names start with `_`, and folders named `access` (the script's own output folders)
 - images whose filenames contain an excluded word (currently `ruler`, case-insensitive)
 
-PDFs and JPEGs both go into an `access` folder inside each image folder, overwriting files with the same name. A folder named `master` (case-insensitive) is the exception: its `access` folder goes next to it, and its PDF takes the parent's name (`b01-f01/master/` → `b01-f01/access/b01-f01.pdf`). If the parent folder holds images too, both would write to the same `access` folder, so both folders fail without writing anything.
+PDFs and JPEGs both go into an `access` folder inside each image folder, overwriting files with the same name. The folder's PDFs from an earlier run that the new ones don't replace (e.g. old parts when the PDF is no longer split) are removed; other files are left alone. A folder named `master` (case-insensitive) is the exception: its `access` folder goes next to it, and its PDF takes the parent's name (`b01-f01/master/` → `b01-f01/access/b01-f01.pdf`). If the parent folder holds images too, both would write to the same `access` folder, so both folders fail without writing anything.
 - `<foldername>.pdf`, or `<foldername>-part01.pdf`, `-part02.pdf`, … when it exceeds `--max-mb`.
 - `<imagename>.jpg`, one per image. If two images would get the same JPEG name (e.g. `a.tif` and `a.jpg`), the folder fails rather than one overwriting the other.
 

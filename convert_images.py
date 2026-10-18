@@ -636,10 +636,29 @@ def move_outputs(files: list[Path], dest_dir: Path) -> None:
         file.replace(dest_dir / file.name)
 
 
+def own_pdfs(pdf_dir: Path, base_name: str, parts_only: bool = False) -> list[Path]:
+    """Return the folder's PDFs in pdf_dir: <base_name>.pdf (unless parts_only) and <base_name>-partNN.pdf.
+    Matched by name rather than glob, since folder names may contain glob characters like [ ]."""
+    if not pdf_dir.is_dir():
+        return []
+    pattern = re.escape(base_name) + (r"-part\d+" if parts_only else r"(-part\d+)?") + r"\.pdf"
+    return sorted(p for p in pdf_dir.iterdir() if re.fullmatch(pattern, p.name))
+
+
+def remove_stale_pdfs(pdf_dir: Path, base_name: str, final_pdfs: list[Path]) -> None:
+    """Before moving in new PDFs, remove the folder's PDFs from earlier runs that the new ones won't replace
+    (e.g. -part04 when there are now 3 parts, or the parts when the PDF is no longer split)."""
+    new_names = {pdf.name for pdf in final_pdfs}
+    for pdf in own_pdfs(pdf_dir, base_name):
+        if pdf.name not in new_names:
+            pdf.unlink()
+            logger.info(f"  Removed PDF from an earlier run: {pdf.name}")
+
+
 def remove_part_pdfs(pdf_dir: Path, base_name: str) -> None:
     """After a failure, remove the folder's split PDFs (<base_name>-partNN.pdf) from pdf_dir, including those
     from earlier runs, so no mixed set of parts is left."""
-    for pdf in pdf_dir.glob(f"{base_name}-part*.pdf"):
+    for pdf in own_pdfs(pdf_dir, base_name, parts_only=True):
         try:
             pdf.unlink()
             logger.info(f"  Removed split PDF: {pdf.name}")
@@ -717,6 +736,7 @@ def convert_folder(folder: Path, args: argparse.Namespace) -> None:
     # 5. Move the outputs into the access folder
     dest_dir = output_dir(folder)
     if args.make_pdf:
+        remove_stale_pdfs(dest_dir, base_name, final_pdfs)
         move_outputs(final_pdfs, dest_dir)
         for pdf in final_pdfs:
             logger.info(f"  Final output written: {dest_dir / pdf.name}")
