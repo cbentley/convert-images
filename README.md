@@ -53,12 +53,12 @@ python convert_images.py jpg /path/to/images
 The script searches `<folder>` and all its subfolders. Every folder that directly contains images (`.tif`, `.tiff`, `.jpg`, `.jpeg`, `.jp2`, `.jpf`) is converted on its own; images are never combined across folders. Pages are sorted by filename in natural order, like Windows Explorer: numbers by value (`page2` before `page10`), ignoring case.
 
 Skipped:
-- folders whose names start with `_`, and folders named `pdf` or `jpg` (the script's own output folders)
+- folders whose names start with `_`, and folders named `access` (the script's own output folders)
 - images whose filenames contain an excluded word (currently `ruler`, case-insensitive)
 
-Output goes into folders inside each image folder, overwriting files with the same name:
-- `pdf/<foldername>.pdf`, or `pdf/<foldername>-part01.pdf`, `-part02.pdf`, … when it exceeds `--max-mb`. A folder named `master` (case-insensitive) takes its parent's name: `b01-f01/master/` → `b01-f01/master/pdf/b01-f01.pdf`.
-- `jpg/<imagename>.jpg`, one per image. If two images would get the same JPEG name (e.g. `a.tif` and `a.jpg`), the folder fails rather than one overwriting the other.
+PDFs and JPEGs both go into an `access` folder inside each image folder, overwriting files with the same name. A folder named `master` (case-insensitive) is the exception: its `access` folder goes next to it, and its PDF takes the parent's name (`b01-f01/master/` → `b01-f01/access/b01-f01.pdf`). If the parent folder holds images too, both would write to the same `access` folder, so both folders fail without writing anything.
+- `<foldername>.pdf`, or `<foldername>-part01.pdf`, `-part02.pdf`, … when it exceeds `--max-mb`.
+- `<imagename>.jpg`, one per image. If two images would get the same JPEG name (e.g. `a.tif` and `a.jpg`), the folder fails rather than one overwriting the other.
 
 Images are converted to sRGB and keep the scanned object's real size: PDF pages are sized from each original's pixels and DPI, and JPEGs that are scaled down get a correspondingly lower DPI. Image size and JPEG quality are set separately for PDF pages and JPEGs (see Configuration). For files holding several images (multi-page TIFFs, Photoshop layers), only the first is used, with a warning in the log. Images with an orientation tag (e.g. a camera's "rotate 90°") are rotated or flipped so they're upright in the output. Metadata from the originals (EXIF, XMP, Photoshop data, comments) is not carried over, only the DPI; images are tagged with a compact sRGB profile. JPEGs are progressive, so web viewers can show a rough version while they load.
 
@@ -74,7 +74,7 @@ Each image folder is processed in its own `_work` directory:
 | 2. Merge         | `_work/02_pre_ocr`      | PDF only: all pages are merged into one PDF.                                                                                                                                             |
 | 3. OCR           | `_work/03_ocr`          | PDF only: OCRmyPDF adds a searchable text layer. Depending on `OCR_OPTS`, it may also re-compress the page images (see Configuration).                                                  |
 | 4. Split         | `_work/04_split`        | PDF only: if the PDF exceeds `--max-mb`, it is split into parts, each holding as many pages as fit.                                                                                      |
-| 5. Finish        |                         | The final PDFs and JPEGs are moved into the `pdf` and `jpg` folders and `_work` is deleted.                                                                                              |
+| 5. Finish        |                         | The final PDFs and JPEGs are moved into the `access` folder and `_work` is deleted.                                                                                              |
 
 ### Errors
 
@@ -99,8 +99,8 @@ Other settings are constants at the top of `convert_images.py`:
 | ------------------------- | --------------------------------------------------------------------- |
 | `ALLOWED_EXT`             | Image file extensions to process                                      |
 | `EXCLUDED_WORDS`          | Filename words that cause an image to be skipped                      |
-| `GENERIC_FOLDER_NAMES`    | Folder names that take their output name from the parent folder       |
-| `PDF_DIR_NAME`, `JPG_DIR_NAME` | Names of the output folders                                      |
+| `GENERIC_FOLDER_NAMES`    | Folder names that take their PDF name from the parent folder and get their `access` folder next to them |
+| `ACCESS_DIR_NAME`         | Name of the output folder                                             |
 | `IMAGEMAGICK_CMD`         | ImageMagick command (default: `magick` if installed, i.e. version 7, else `convert`) |
 | `IMAGEMAGICK_INPUT_OPTS`  | ImageMagick options before the input file (e.g. `-density`, commented out so output keeps each scan's real size) |
 | `FALLBACK_DPI`            | DPI assumed for PDF page size when an image doesn't store one         |

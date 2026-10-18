@@ -49,7 +49,7 @@ def test_find_image_folders_skips_work_log_and_output_folders(tmp_path):
     touch(tmp_path / "a" / "master", "1.tif")
     touch(tmp_path / "a" / "master" / "deeper", "2.jpg")
     touch(tmp_path / "b", "only-ruler.tif", "readme.txt")
-    for skipped in ("_work", "_logs", "pdf", "JPG", "Pdf"):
+    for skipped in ("_work", "_logs", "access", "Access"):
         touch(tmp_path / "a" / skipped, "x.jpg")
         touch(tmp_path / "a" / skipped / "sub", "x.jpg")
     found = sorted(ci.find_image_folders(tmp_path))
@@ -63,6 +63,24 @@ def test_find_image_folders_skips_work_log_and_output_folders(tmp_path):
 ])
 def test_output_base_name(folder, name):
     assert ci.output_base_name(Path("/data") / folder) == name
+
+
+@pytest.mark.parametrize("folder, out", [
+    ("b01-f01/master", "b01-f01/access"),
+    ("b01-f01/Master", "b01-f01/access"),
+    ("b01-f01/scans", "b01-f01/scans/access"),
+])
+def test_output_dir(folder, out):
+    assert ci.output_dir(Path("/data") / folder) == Path("/data") / out
+
+
+def test_output_dir_clashes():
+    data = Path("/data")
+    folders = [data / "b01", data / "b01" / "master", data / "b01" / "scans", data / "b02" / "master"]
+    assert ci.output_dir_clashes(folders) == {
+        data / "b01": [data / "b01" / "master"],
+        data / "b01" / "master": [data / "b01"],
+    }
 
 
 def test_check_jpg_name_clashes_is_case_insensitive():

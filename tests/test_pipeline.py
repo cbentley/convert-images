@@ -142,14 +142,16 @@ def test_mixed_run_succeeds_and_cleans_up(mixed_run):
 @needs_ocr
 def test_mixed_run_pdf_names(mixed_run):
     root, folder, _ = mixed_run
-    assert [p.name for p in (folder / "pdf").iterdir()] == ["b01.pdf"]  # "master" takes the parent's name
-    assert [p.name for p in (root / "other" / "pdf").iterdir()] == ["other.pdf"]
+    # "master" takes the parent's name, and its access folder goes next to it
+    assert not (folder / "access").exists()
+    assert [p.name for p in (root / "b01" / "access").glob("*.pdf")] == ["b01.pdf"]
+    assert [p.name for p in (root / "other" / "access").glob("*.pdf")] == ["other.pdf"]
 
 
 @needs_ocr
 def test_mixed_run_pdf_pages(mixed_run):
     _, folder, _ = mixed_run
-    pages = page_info(folder / "pdf" / "b01.pdf")
+    pages = page_info(folder.parent / "access" / "b01.pdf")
     # Natural order puts p7_exif6.jpg (740x400 stored, 400x740 upright, 300 DPI) between p6 and p10;
     # ruler.tif is excluded
     expected = [(w, h, dpi) for _, w, h, _, dpi in MIXED_IMAGES]
@@ -164,9 +166,9 @@ def test_mixed_run_pdf_pages(mixed_run):
 @needs_ocr
 def test_mixed_run_jpegs(mixed_run):
     _, folder, _ = mixed_run
-    jpg_dir = folder / "jpg"
+    jpg_dir = folder.parent / "access"
     names = {name.rsplit(".", 1)[0] for name, *_ in MIXED_IMAGES} | {"p7_exif6"}
-    assert {p.stem for p in jpg_dir.iterdir()} == names
+    assert {p.stem for p in jpg_dir.glob("*.jpg")} == names
 
     srgb = Path(ci.SRGB_PROFILE).read_bytes()
     expected = {  # name: (mode, has sRGB profile, DPI)
@@ -190,7 +192,7 @@ def test_mixed_run_jpegs(mixed_run):
 @needs_ocr
 def test_mixed_run_untagged_rgb_keeps_its_colors(mixed_run):
     _, folder, _ = mixed_run
-    with Image.open(folder / "jpg" / "p1_rgb.jpg") as im:
+    with Image.open(folder.parent / "access" / "p1_rgb.jpg") as im:
         assert im.getpixel((5, 5)) == pytest.approx(BACKGROUND, abs=3)
 
 
@@ -213,7 +215,7 @@ def test_adobe_rgb_is_converted_to_srgb(tmp_path):
 
     adobe_to_srgb = ImageCms.buildTransform(str(ADOBE_RGB_PROFILE), str(ci.SRGB_PROFILE), "RGB", "RGB")
     expected = ImageCms.applyTransform(Image.new("RGB", (1, 1), BACKGROUND), adobe_to_srgb).getpixel((0, 0))
-    with Image.open(tmp_path / "jpg" / "adobe.jpg") as im:
+    with Image.open(tmp_path / "access" / "adobe.jpg") as im:
         assert im.info["icc_profile"] == Path(ci.SRGB_PROFILE).read_bytes()
         assert im.getpixel((5, 5)) == pytest.approx(expected, abs=3)
         assert expected != pytest.approx(BACKGROUND, abs=6), "test colors should change visibly"
@@ -234,13 +236,13 @@ def test_metadata_is_stripped(tmp_path, monkeypatch):
         im.convert("RGB").save(tmp_path / "in" / "a.jpg", exif=exif, comment=b"scan note", dpi=(300, 300))
     assert run("pdf", str(tmp_path / "in"), "--jpg", "--no-ocr") == 0
 
-    with Image.open(tmp_path / "in" / "jpg" / "a.jpg") as im:
+    with Image.open(tmp_path / "in" / "access" / "a.jpg") as im:
         assert 0x0112 not in im.getexif()
         assert "comment" not in im.info
         assert im.info["icc_profile"] == Path(ci.SRGB_PROFILE).read_bytes()
         assert im.info["dpi"] == pytest.approx((300, 300), abs=1)
         assert im.info.get("progressive")
-    with pikepdf.open(tmp_path / "in" / "pdf" / "in.pdf") as pdf:
+    with pikepdf.open(tmp_path / "in" / "access" / "in.pdf") as pdf:
         (image,) = pdf.pages[0].images.values()
         data = image.read_raw_bytes()
         assert data[:2] == b"\xff\xd8"  # Still the JPEG img2pdf embedded, not re-encoded
@@ -291,15 +293,15 @@ def test_orientation_tag_is_applied(tmp_path, orientation, size, corner):
     assert run("pdf", str(tmp_path / "in"), "--jpg", "--no-ocr") == 0
 
     turned = size == (200, 300)
-    with Image.open(tmp_path / "in" / "jpg" / "a.jpg") as im:
+    with Image.open(tmp_path / "in" / "access" / "a.jpg") as im:
         assert im.size == size
         assert red_corner(im) == corner
         assert im.info["dpi"] == pytest.approx((150, 300) if turned else (300, 150), abs=1)
-    (page,) = page_info(tmp_path / "in" / "pdf" / "in.pdf")
+    (page,) = page_info(tmp_path / "in" / "access" / "in.pdf")
     assert page["pixels"] == size
     assert page["rotate"] == 0
     assert page["size"] == pytest.approx((96, 72) if turned else (72, 96), abs=0.01)
-    with pikepdf.open(tmp_path / "in" / "pdf" / "in.pdf") as pdf:
+    with pikepdf.open(tmp_path / "in" / "access" / "in.pdf") as pdf:
         (image,) = pdf.pages[0].images.values()
         assert red_corner(pikepdf.PdfImage(image).as_pil_image()) == corner
 
@@ -313,10 +315,10 @@ def test_resize_keeps_real_size(tmp_path, monkeypatch):
     make_image(tmp_path / "a.tif", 600, 400, *dpi_opts(300))
     assert run("pdf", str(tmp_path), "--jpg", "--no-ocr") == 0
 
-    (page,) = page_info(tmp_path / "pdf" / f"{tmp_path.name}.pdf")
+    (page,) = page_info(tmp_path / "access" / f"{tmp_path.name}.pdf")
     assert page["pixels"] == (300, 200)
     assert page["size"] == pytest.approx((144, 96), abs=0.01)  # Original 600x400 px at 300 DPI
-    with Image.open(tmp_path / "jpg" / "a.jpg") as im:
+    with Image.open(tmp_path / "access" / "a.jpg") as im:
         assert im.size == (200, 133)
         assert im.info["dpi"] == pytest.approx((100, 100), abs=1)  # 300 DPI scaled by 200/600
 
@@ -329,7 +331,7 @@ def test_large_pdf_is_split_under_max_mb(tmp_path):
         make_noise_image(tmp_path / f"noise{i}.tif", 1000)
     assert run("pdf", str(tmp_path), "--max-mb", "1", "--no-ocr") == 0
 
-    parts = sorted((tmp_path / "pdf").iterdir())
+    parts = sorted((tmp_path / "access").iterdir())
     assert len(parts) > 1
     assert [p.name for p in parts] == [f"{tmp_path.name}-part{i:02d}.pdf" for i in range(1, len(parts) + 1)]
     for part in parts:
@@ -343,7 +345,7 @@ def test_large_pdf_is_split_under_max_mb(tmp_path):
 def test_no_ocr_ignores_missing_language(tmp_path):
     make_image(tmp_path / "a.tif")
     assert run("pdf", str(tmp_path), "--no-ocr", "--ocr-lang", "xyz") == 0
-    (page,) = page_info(tmp_path / "pdf" / f"{tmp_path.name}.pdf")
+    (page,) = page_info(tmp_path / "access" / f"{tmp_path.name}.pdf")
     assert not page["text"]
     assert "Ignoring --ocr-lang xyz" in log_text(tmp_path)
 
@@ -355,8 +357,7 @@ def test_jpg_only_makes_no_pdf(tmp_path):
     make_image(tmp_path / "a.tif")
     make_image(tmp_path / "b.jpg")
     assert run("jpg", str(tmp_path)) == 0
-    assert sorted(p.name for p in (tmp_path / "jpg").iterdir()) == ["a.jpg", "b.jpg"]
-    assert not (tmp_path / "pdf").exists()
+    assert sorted(p.name for p in (tmp_path / "access").iterdir()) == ["a.jpg", "b.jpg"]
     assert not (tmp_path / "_work").exists()
 
 
@@ -371,16 +372,36 @@ def test_corrupt_image_fails_folder_keeps_work_and_continues(tmp_path):
 
     assert run("pdf", str(tmp_path), "--no-ocr") == 1
     assert (bad / "_work").exists()  # Unexpected failure: kept for debugging
-    assert not (bad / "pdf").exists()
-    assert (good / "pdf" / "good.pdf").exists()
+    assert not (bad / "access").exists()
+    assert (good / "access" / "good.pdf").exists()
     assert "Finished with 1 failed folder(s)" in log_text(tmp_path)
+
+
+@needs_ocr
+def test_shared_output_folder_fails_both_folders_and_keeps_outputs(tmp_path):
+    parent = tmp_path / "b01"
+    make_image(parent / "a.tif")
+    make_image(parent / "master" / "b.tif")
+    make_image(tmp_path / "other" / "c.tif")
+    access = parent / "access"
+    access.mkdir()
+    (access / "b01-part01.pdf").write_bytes(b"old")  # From an earlier run; must not be removed
+
+    assert run("pdf", str(tmp_path), "--no-ocr") == 1
+    assert [p.name for p in access.iterdir()] == ["b01-part01.pdf"]
+    assert not (parent / "_work").exists() and not (parent / "master" / "_work").exists()
+    assert (tmp_path / "other" / "access" / "other.pdf").exists()
+    log = log_text(tmp_path)
+    assert f"is also used by the images in {parent / 'master'}" in log
+    assert f"is also used by the images in {parent}." in log
+    assert "Finished with 2 failed folder(s)" in log
 
 
 @needs_ocr
 def test_name_clash_fails_folder_and_removes_split_pdfs(tmp_path):
     make_image(tmp_path / "a.tif")
     make_image(tmp_path / "a.jpg")
-    pdf_dir = tmp_path / "pdf"
+    pdf_dir = tmp_path / "access"
     pdf_dir.mkdir()
     for name in (f"{tmp_path.name}-part01.pdf", f"{tmp_path.name}.pdf", "unrelated.pdf"):
         (pdf_dir / name).write_bytes(b"old")

@@ -37,11 +37,11 @@ from PIL import Image
 ALLOWED_EXT = {".tif", ".tiff", ".jpg", ".jpeg", ".jp2", ".jpf"}
 # Images whose filenames contain any of these words (case-insensitive) are skipped
 EXCLUDED_WORDS = {"ruler"}
-# Folder names that are too generic to name the output; use the parent's name instead
+# Folder names that are too generic to name the output; use the parent's name instead, and put the output folder
+# next to the image folder rather than inside it. Lowercase.
 GENERIC_FOLDER_NAMES = {"master"}
-# Output folders created inside each image folder. Folders with these names are never searched for images.
-PDF_DIR_NAME = "pdf"
-JPG_DIR_NAME = "jpg"
+# Output folder for the PDFs and JPEGs. Folders with this name are never searched for images.
+ACCESS_DIR_NAME = "access"
 
 # --- ImageMagick (encodes each image as a JPEG; for PDFs, img2pdf wraps it into a page without re-encoding) ---
 # "magick" on ImageMagick 7 (where "convert" is deprecated), "convert" on ImageMagick 6
@@ -544,13 +544,15 @@ examples:
         formatter_class=argparse.RawDescriptionHelpFormatter,  # Keep the epilog's line breaks
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    generic_names = " or ".join(sorted(GENERIC_FOLDER_NAMES))
     folder_help = ("Folder with the scans. Subfolders are searched too, "
                    "and each folder with images is converted on its own.")
 
     pdf_parser = subparsers.add_parser(
         "pdf",
-        help="Make an OCR'd PDF per image folder, in its pdf folder",
-        description="Make an OCR'd, size-limited PDF per image folder, written to a pdf folder inside it.",
+        help="Make an OCR'd PDF per image folder, in its access folder",
+        description="Make an OCR'd, size-limited PDF per image folder, written to an access folder inside it "
+                    f"(next to it for a folder named {generic_names}).",
     )
     pdf_parser.add_argument("folder", help=folder_help)
     pdf_parser.add_argument(
@@ -572,14 +574,15 @@ examples:
         "--jpg",
         dest="make_jpg",
         action="store_true",
-        help="Also save each image as a JPEG in a jpg folder inside its image folder."
+        help="Also save each image as a JPEG, in the same access folder."
     )
     pdf_parser.set_defaults(make_pdf=True)
 
     jpg_parser = subparsers.add_parser(
         "jpg",
-        help="Save each image as a JPEG, in a jpg folder inside its image folder",
-        description="Save each image as a JPEG, written to a jpg folder inside its image folder.",
+        help="Save each image as a JPEG, in its folder's access folder",
+        description="Save each image as a JPEG, written to an access folder inside its image folder "
+                    f"(next to it for a folder named {generic_names}).",
     )
     jpg_parser.add_argument("folder", help=folder_help)
     jpg_parser.set_defaults(make_pdf=False, make_jpg=True)
@@ -597,16 +600,33 @@ examples:
 # OUTPUT FILES
 # ============================================================
 
+def is_generic_folder(folder: Path) -> bool:
+    return folder.name.lower() in GENERIC_FOLDER_NAMES
+
+
 def output_base_name(folder: Path) -> str:
     """Return the base name for a folder's final PDF(s)."""
-    if folder.name.lower() in GENERIC_FOLDER_NAMES:
-        return folder.parent.name
-    return folder.name
+    return folder.parent.name if is_generic_folder(folder) else folder.name
+
+
+def output_dir(folder: Path) -> Path:
+    """Return the folder an image folder's PDFs and JPEGs go to: next to a generic folder, else inside it."""
+    return (folder.parent if is_generic_folder(folder) else folder) / ACCESS_DIR_NAME
+
+
+def output_dir_clashes(folders: list[Path]) -> dict[Path, list[Path]]:
+    """Map each folder that shares its output folder with other image folders (e.g. b01 and b01/master both
+    write to b01/access) to those other folders. Their PDFs would get the same name and overwrite each other."""
+    by_output: dict[Path, list[Path]] = {}
+    for folder in folders:
+        by_output.setdefault(output_dir(folder), []).append(folder)
+    return {folder: [other for other in group if other != folder]
+            for group in by_output.values() if len(group) > 1 for folder in group}
 
 
 def is_output_dir(name: str) -> bool:
-    """True for the script's own output folders, which are never searched for images."""
-    return name.lower() in (PDF_DIR_NAME.lower(), JPG_DIR_NAME.lower())
+    """True for the script's own output folder, which is never searched for images."""
+    return name.lower() == ACCESS_DIR_NAME.lower()
 
 
 def move_outputs(files: list[Path], dest_dir: Path) -> None:
@@ -670,7 +690,7 @@ def make_final_pdfs(page_pdfs: list[Path], work_dir: Path, base_name: str, args:
 
 
 def convert_folder(folder: Path, args: argparse.Namespace) -> None:
-    """Convert one image folder's images into its pdf and/or jpg folder. Intermediate files go to folder/_work;
+    """Convert one image folder's images into PDFs and/or JPEGs in its access folder. Intermediate files go to folder/_work;
     outputs are moved out only after every step succeeded. Raises on failure."""
     images = select_images(folder)
     if not images:
@@ -694,16 +714,15 @@ def convert_folder(folder: Path, args: argparse.Namespace) -> None:
     base_name = output_base_name(folder)
     final_pdfs = make_final_pdfs(page_pdfs, work_dir, base_name, args) if args.make_pdf else []
 
-    # 5. Move the outputs into the pdf and jpg folders
+    # 5. Move the outputs into the access folder
+    dest_dir = output_dir(folder)
     if args.make_pdf:
-        pdf_dir = folder / PDF_DIR_NAME
-        move_outputs(final_pdfs, pdf_dir)
+        move_outputs(final_pdfs, dest_dir)
         for pdf in final_pdfs:
-            logger.info(f"  Final output written: {pdf_dir / pdf.name}")
+            logger.info(f"  Final output written: {dest_dir / pdf.name}")
     if args.make_jpg:
-        jpg_dir = folder / JPG_DIR_NAME
-        move_outputs(sorted(jpg_work_dir.iterdir()), jpg_dir)
-        logger.info(f"  {len(images)} JPEGs written to: {jpg_dir}")
+        move_outputs(sorted(jpg_work_dir.iterdir()), dest_dir)
+        logger.info(f"  {len(images)} JPEGs written to: {dest_dir}")
 
 
 def process_folder(folder: Path, args: argparse.Namespace) -> bool:
@@ -739,7 +758,7 @@ def process_folder(folder: Path, args: argparse.Namespace) -> bool:
                 logger.exception(f"  Failed to remove work directory: {work_dir}")
 
     if not success and args.make_pdf:
-        remove_part_pdfs(folder / PDF_DIR_NAME, output_base_name(folder))
+        remove_part_pdfs(output_dir(folder), output_base_name(folder))
     return success
 
 
@@ -759,7 +778,18 @@ def main(argv=None) -> int:
         logger.warning(f"Ignoring --ocr-lang {args.ocr_lang}: no text is recognized with --no-ocr")
     validate_external_tools(need_ocrmypdf=args.make_pdf)
 
-    failed_folders = [folder for folder in find_image_folders(input_folder) if not process_folder(folder, args)]
+    folders = list(find_image_folders(input_folder))
+    clashes = output_dir_clashes(folders)
+    failed_folders = []
+    for folder in folders:
+        if folder in clashes:
+            # Fails before anything is written or cleaned up, so the other folder's outputs are left alone
+            others = ", ".join(str(other) for other in clashes[folder])
+            logger.error(f"\nFolder failed: {folder}\n  Its output folder {output_dir(folder)} is also used by "
+                         f"the images in {others}. Move one set of images into its own folder.")
+            failed_folders.append(folder)
+        elif not process_folder(folder, args):
+            failed_folders.append(folder)
 
     if failed_folders:
         logger.error(f"\nFinished with {len(failed_folders)} failed folder(s):")
