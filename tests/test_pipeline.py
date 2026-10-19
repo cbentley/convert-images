@@ -1,6 +1,7 @@
 """End-to-end tests: run main() on images generated with ImageMagick and check the PDFs and JPEGs.
 Skipped if ImageMagick, the sRGB profile, OCRmyPDF or Tesseract's English data is missing."""
 import io
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -398,21 +399,78 @@ def test_shared_output_folder_fails_both_folders_and_keeps_outputs(tmp_path):
 
 
 @needs_ocr
-def test_rerun_removes_stale_pdfs_and_keeps_others(tmp_path):
+def test_pdf_rerun_replaces_all_pdfs_and_keeps_jpgs(tmp_path):
     make_image(tmp_path / "a.tif")
-    pdf_dir = tmp_path / "access"
-    pdf_dir.mkdir()
-    for name in (f"{tmp_path.name}-part01.pdf", f"{tmp_path.name}-part02.pdf", "unrelated.pdf"):
-        (pdf_dir / name).write_bytes(b"old")  # From an earlier run that was split
+    access = tmp_path / "access"
+    access.mkdir()
+    for name in (f"{tmp_path.name}-part01.pdf", f"{tmp_path.name}-part02.pdf", "unrelated.PDF", "old.jpg"):
+        (access / name).write_bytes(b"old")  # From an earlier run
 
     assert run("pdf", str(tmp_path), "--no-ocr") == 0
-    assert sorted(p.name for p in pdf_dir.iterdir()) == [f"{tmp_path.name}.pdf", "unrelated.pdf"]
-    assert len(page_info(pdf_dir / f"{tmp_path.name}.pdf")) == 1
-    assert "Removed PDF from an earlier run" in log_text(tmp_path)
+    assert sorted(p.name for p in access.iterdir()) == ["old.jpg", f"{tmp_path.name}.pdf"]
+    assert len(page_info(access / f"{tmp_path.name}.pdf")) == 1
+    assert "Removed 3 PDFs from an earlier run" in log_text(tmp_path)
+
+
+@needs_imagemagick
+def test_jpg_rerun_replaces_all_jpgs_and_keeps_pdfs(tmp_path):
+    make_image(tmp_path / "a.tif")
+    access = tmp_path / "access"
+    (access / "sub").mkdir(parents=True)
+    for name in ("a.jpg", "removed.JPG", "old.jpeg", "keep.pdf", "sub/keep.jpg"):
+        (access / name).write_bytes(b"old")
+
+    assert run("jpg", str(tmp_path)) == 0
+    assert sorted(p.name for p in access.iterdir()) == ["a.jpg", "keep.pdf", "sub"]
+    assert (access / "a.jpg").read_bytes() != b"old"
+    assert (access / "sub" / "keep.jpg").exists()
+
+
+@needs_imagemagick
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write to read-only files")
+def test_locked_output_fails_folder_before_converting(tmp_path):
+    locked, good = tmp_path / "locked", tmp_path / "good"
+    make_image(locked / "a.tif")
+    make_image(good / "a.tif")
+    access = locked / "access"
+    access.mkdir()
+    for name in ("a.jpg", "old.jpg"):
+        (access / name).write_bytes(b"old")
+    (access / "old.jpg").chmod(0o444)  # Like a file open in a Windows program: opening for writing fails
+
+    assert run("jpg", str(tmp_path)) == 1
+    assert sorted(p.name for p in access.iterdir()) == ["a.jpg", "old.jpg"]
+    assert (access / "a.jpg").read_bytes() == b"old"
+    log = log_text(tmp_path)
+    assert f"Processing folder: {locked}" not in log  # Failed before converting
+    assert f"Can't replace old.jpg in {access}. Is it open in another program?" in log
+    assert (good / "access" / "a.jpg").exists()
+
+
+@needs_imagemagick
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write to read-only files")
+def test_output_locked_during_run_fails_folder_and_keeps_access(tmp_path, monkeypatch):
+    make_image(tmp_path / "a.tif")
+    access = tmp_path / "access"
+    access.mkdir()
+    old = access / "old.jpg"
+    old.write_bytes(b"old")
+    convert_all_images = ci.convert_all_images
+
+    def convert_then_lock(*args):
+        result = convert_all_images(*args)
+        old.chmod(0o444)  # Opened in a Windows program while the images were converted
+        return result
+
+    monkeypatch.setattr(ci, "convert_all_images", convert_then_lock)
+    assert run("jpg", str(tmp_path)) == 1
+    assert [p.name for p in access.iterdir()] == ["old.jpg"]
+    assert not (tmp_path / "_work").exists()  # FolderError: an expected problem, so _work is deleted
+    assert "Can't replace old.jpg" in log_text(tmp_path)
 
 
 @needs_ocr
-def test_name_clash_fails_folder_and_removes_split_pdfs(tmp_path):
+def test_name_clash_fails_folder_and_keeps_access(tmp_path):
     make_image(tmp_path / "a.tif")
     make_image(tmp_path / "a.jpg")
     pdf_dir = tmp_path / "access"
@@ -424,7 +482,8 @@ def test_name_clash_fails_folder_and_removes_split_pdfs(tmp_path):
 
     assert run("pdf", str(tmp_path), "--jpg", "--no-ocr") == 1
     assert not (tmp_path / "_work").exists()  # FolderError: an expected problem, so _work is deleted
-    assert sorted(p.name for p in pdf_dir.iterdir()) == [f"{tmp_path.name}.pdf", "unrelated.pdf"]
+    assert sorted(p.name for p in pdf_dir.iterdir()) == sorted(
+        [f"{tmp_path.name}-part01.pdf", f"{tmp_path.name}.pdf", "unrelated.pdf"])
     log = log_text(tmp_path)
     assert "These images would get the same JPEG name: a.jpg and a.tif" in log
     assert "Traceback" not in log

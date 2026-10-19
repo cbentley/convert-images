@@ -56,7 +56,7 @@ Skipped:
 - folders whose names start with `_`, and folders named `access` (the script's own output folders)
 - images whose filenames contain an excluded word (currently `ruler`, case-insensitive)
 
-PDFs and JPEGs both go into an `access` folder inside each image folder, overwriting files with the same name. The folder's PDFs from an earlier run that the new ones don't replace (e.g. old parts when the PDF is no longer split) are removed; other files are left alone. A folder named `master` (case-insensitive) is the exception: its `access` folder goes next to it, and its PDF takes the parent's name (`b01-f01/master/` → `b01-f01/access/b01-f01.pdf`). If the parent folder holds images too, both would write to the same `access` folder, so both folders fail without writing anything.
+PDFs and JPEGs both go into an `access` folder inside each image folder. When a folder succeeds, the files of the kind just made are replaced: `pdf` deletes every PDF and `jpg` every JPEG (`.jpg`/`.jpeg`) directly in its `access` folder before moving in the new ones (the log says how many of each kind), so files from earlier runs, including ones added by hand, don't linger. Other files and subfolders are left alone. If one of those files can't be replaced, usually because it's open in a program (Acrobat locks open PDFs on Windows drives), the folder fails without changing its `access` folder. This is checked before any folder is converted and again just before replacing. A folder named `master` (case-insensitive) is the exception: its `access` folder goes next to it, and its PDF takes the parent's name (`b01-f01/master/` → `b01-f01/access/b01-f01.pdf`). If the parent folder holds images too, both would write to the same `access` folder, so both folders fail without writing anything.
 - `<foldername>.pdf`, or `<foldername>-part01.pdf`, `-part02.pdf`, … when it exceeds `--max-mb`.
 - `<imagename>.jpg`, one per image. If two images would get the same JPEG name (e.g. `a.tif` and `a.jpg`), the folder fails rather than one overwriting the other.
 
@@ -78,7 +78,7 @@ Each image folder is processed in its own `_work` directory:
 
 ### Errors
 
-If any step fails for a folder, including OCR (there is no non-OCR fallback), that folder gets no new output and the script moves on to the next folder. Split PDFs (`-partNN`) already in its `pdf` folder are removed, including complete ones from earlier runs, so no mix of old and new parts is left. Its `_work` directory is kept for debugging, except when the failure is a problem with the folder's contents that the log explains (such as a JPEG name clash). Failed folders are listed at the end.
+If any step fails for a folder, including OCR (there is no non-OCR fallback), that folder gets no new output and the script moves on to the next folder. Its `access` folder is left unchanged. Its `_work` directory is kept for debugging, except when the failure is a problem with the folder's contents that the log explains (such as a JPEG name clash). Failed folders are listed at the end.
 
 Exit status: `0` if all folders succeeded, `1` if any failed, `2` for invalid options or a folder that doesn't exist.
 

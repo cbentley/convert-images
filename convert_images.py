@@ -636,34 +636,52 @@ def move_outputs(files: list[Path], dest_dir: Path) -> None:
         file.replace(dest_dir / file.name)
 
 
-def own_pdfs(pdf_dir: Path, base_name: str, parts_only: bool = False) -> list[Path]:
-    """Return the folder's PDFs in pdf_dir: <base_name>.pdf (unless parts_only) and <base_name>-partNN.pdf.
-    Matched by name rather than glob, since folder names may contain glob characters like [ ]."""
-    if not pdf_dir.is_dir():
+PDF_SUFFIXES = {".pdf"}
+JPG_SUFFIXES = {".jpg", ".jpeg"}
+
+
+def output_suffixes(args: argparse.Namespace) -> set[str]:
+    """Extensions of the files a run replaces in the access folder: PDFs when making PDFs, JPEGs when making JPEGs."""
+    return (PDF_SUFFIXES if args.make_pdf else set()) | (JPG_SUFFIXES if args.make_jpg else set())
+
+
+def old_outputs(dest_dir: Path, suffixes: set[str]) -> list[Path]:
+    """Return the files directly in dest_dir with one of the suffixes (case-insensitive). They're all replaced by
+    the new outputs; each access folder belongs to one image folder (see output_dir_clashes)."""
+    if not dest_dir.is_dir():
         return []
-    pattern = re.escape(base_name) + (r"-part\d+" if parts_only else r"(-part\d+)?") + r"\.pdf"
-    return sorted(p for p in pdf_dir.iterdir() if re.fullmatch(pattern, p.name))
+    return sorted(p for p in dest_dir.iterdir() if p.is_file() and p.suffix.lower() in suffixes)
 
 
-def remove_stale_pdfs(pdf_dir: Path, base_name: str, final_pdfs: list[Path]) -> None:
-    """Before moving in new PDFs, remove the folder's PDFs from earlier runs that the new ones won't replace
-    (e.g. -part04 when there are now 3 parts, or the parts when the PDF is no longer split)."""
-    new_names = {pdf.name for pdf in final_pdfs}
-    for pdf in own_pdfs(pdf_dir, base_name):
-        if pdf.name not in new_names:
-            pdf.unlink()
-            logger.info(f"  Removed PDF from an earlier run: {pdf.name}")
-
-
-def remove_part_pdfs(pdf_dir: Path, base_name: str) -> None:
-    """After a failure, remove the folder's split PDFs (<base_name>-partNN.pdf) from pdf_dir, including those
-    from earlier runs, so no mixed set of parts is left."""
-    for pdf in own_pdfs(pdf_dir, base_name, parts_only=True):
+def check_not_locked(files: list[Path]) -> None:
+    """Raise if a file can't be opened for writing, usually because a Windows program has it open (e.g. a PDF in
+    Acrobat or PDFgear; Photoshop doesn't keep JPEGs open). Windows then also blocks deleting or replacing it.
+    Files inside WSL (not under /mnt) are never locked this way."""
+    locked = []
+    for file in files:
         try:
-            pdf.unlink()
-            logger.info(f"  Removed split PDF: {pdf.name}")
-        except Exception:
-            logger.exception(f"  Failed to remove split PDF: {pdf.name}")
+            with open(file, "r+b"):
+                pass
+        except OSError:
+            locked.append(file.name)
+    if locked:
+        question = "Is it open" if len(locked) == 1 else "Are they open"
+        it = "it" if len(locked) == 1 else "them"
+        raise FolderError(
+            f"Can't replace {', '.join(locked)} in {files[0].parent}. {question} in another program? "
+            f"Close {it} and run again."
+        )
+
+
+def remove_old_outputs(files: list[Path]) -> None:
+    """Delete the outputs of earlier runs, just before the new ones are moved in, and log how many of each kind."""
+    counts = {"PDF": 0, "JPEG": 0}
+    for file in files:
+        file.unlink()
+        counts["PDF" if file.suffix.lower() in PDF_SUFFIXES else "JPEG"] += 1
+    removed = " and ".join(f"{n} {kind}{'s' if n > 1 else ''}" for kind, n in counts.items() if n)
+    if removed:
+        logger.info(f"  Removed {removed} from an earlier run")
 
 
 # ============================================================
@@ -735,8 +753,10 @@ def convert_folder(folder: Path, args: argparse.Namespace) -> None:
 
     # 5. Move the outputs into the access folder
     dest_dir = output_dir(folder)
+    old_files = old_outputs(dest_dir, output_suffixes(args))
+    check_not_locked(old_files)  # Again, in case a file was opened during the run
+    remove_old_outputs(old_files)
     if args.make_pdf:
-        remove_stale_pdfs(dest_dir, base_name, final_pdfs)
         move_outputs(final_pdfs, dest_dir)
         for pdf in final_pdfs:
             logger.info(f"  Final output written: {dest_dir / pdf.name}")
@@ -777,8 +797,6 @@ def process_folder(folder: Path, args: argparse.Namespace) -> bool:
             except Exception:
                 logger.exception(f"  Failed to remove work directory: {work_dir}")
 
-    if not success and args.make_pdf:
-        remove_part_pdfs(output_dir(folder), output_base_name(folder))
     return success
 
 
@@ -800,13 +818,23 @@ def main(argv=None) -> int:
 
     folders = list(find_image_folders(input_folder))
     clashes = output_dir_clashes(folders)
+    # Checked for every folder before any is converted, so an open file shows up at once, not after hours of OCR
+    locked = {}
+    for folder in folders:
+        try:
+            check_not_locked(old_outputs(output_dir(folder), output_suffixes(args)))
+        except FolderError as e:
+            locked[folder] = e
     failed_folders = []
     for folder in folders:
+        # The first two fail before anything is written or cleaned up, so the access folder is left alone
         if folder in clashes:
-            # Fails before anything is written or cleaned up, so the other folder's outputs are left alone
             others = ", ".join(str(other) for other in clashes[folder])
             logger.error(f"\nFolder failed: {folder}\n  Its output folder {output_dir(folder)} is also used by "
                          f"the images in {others}. Move one set of images into its own folder.")
+            failed_folders.append(folder)
+        elif folder in locked:
+            logger.error(f"\nFolder failed: {folder}\n  {locked[folder]}")
             failed_folders.append(folder)
         elif not process_folder(folder, args):
             failed_folders.append(folder)

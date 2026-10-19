@@ -1,5 +1,7 @@
 """Tests of the pure-Python parts; no ImageMagick or OCRmyPDF needed."""
+import argparse
 import io
+import os
 from pathlib import Path
 
 import pytest
@@ -184,27 +186,47 @@ def test_move_outputs_replaces_same_name_and_keeps_others(tmp_path):
     assert not (work / "a.pdf").exists()
 
 
-def test_remove_part_pdfs_removes_only_this_folders_parts(tmp_path):
-    touch(tmp_path, "b01-part01.pdf", "b01-part02.pdf", "b01.pdf", "b02-part01.pdf")
-    ci.remove_part_pdfs(tmp_path, "b01")
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["b01.pdf", "b02-part01.pdf"]
-
-
-def test_own_pdfs_matches_names_literally(tmp_path):
-    touch(tmp_path, "b[1].pdf", "b[1]-part01.pdf", "b1.pdf", "b[1]-part-notes.pdf", "b[1]-part01.jpg")
-    assert [p.name for p in ci.own_pdfs(tmp_path, "b[1]")] == ["b[1]-part01.pdf", "b[1].pdf"]
-    assert [p.name for p in ci.own_pdfs(tmp_path, "b[1]", parts_only=True)] == ["b[1]-part01.pdf"]
-    assert ci.own_pdfs(tmp_path / "missing", "b[1]") == []
-
-
-@pytest.mark.parametrize("old, new, kept", [
-    (["b01-part01.pdf", "b01-part02.pdf", "b01-part03.pdf"], ["b01-part01.pdf", "b01-part02.pdf"],
-     ["b01-part01.pdf", "b01-part02.pdf"]),
-    (["b01-part01.pdf", "b01-part02.pdf"], ["b01.pdf"], []),
-    (["b01.pdf"], ["b01-part01.pdf", "b01-part02.pdf"], []),
+@pytest.mark.parametrize("make_pdf, make_jpg, expected", [
+    (True, False, ["a.pdf", "b.PDF"]),
+    (False, True, ["c.jpg", "d.JPEG"]),
+    (True, True, ["a.pdf", "b.PDF", "c.jpg", "d.JPEG"]),
 ])
-def test_remove_stale_pdfs_removes_only_what_wont_be_replaced(tmp_path, old, new, kept):
-    dest = tmp_path / "dest"
-    touch(dest, *old, "b02.pdf", "notes.pdf")
-    ci.remove_stale_pdfs(dest, "b01", [tmp_path / "work" / name for name in new])
-    assert sorted(p.name for p in dest.iterdir()) == sorted(kept + ["b02.pdf", "notes.pdf"])
+def test_old_outputs_selects_by_command(tmp_path, make_pdf, make_jpg, expected):
+    touch(tmp_path, "a.pdf", "b.PDF", "c.jpg", "d.JPEG", "e.tif", "notes.txt", "g.pdf.bak")
+    touch(tmp_path / "sub", "f.pdf", "h.jpg")  # Subfolders are left alone
+    args = argparse.Namespace(make_pdf=make_pdf, make_jpg=make_jpg)
+    assert [p.name for p in ci.old_outputs(tmp_path, ci.output_suffixes(args))] == expected
+
+
+def test_old_outputs_missing_folder(tmp_path):
+    assert ci.old_outputs(tmp_path / "missing", {".pdf"}) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write to read-only files")
+def test_check_not_locked_names_files_that_cant_be_written(tmp_path):
+    touch(tmp_path, "a.pdf", "b.pdf", "c.pdf")
+    files = sorted(tmp_path.iterdir())
+    ci.check_not_locked(files)
+    for name in ("a.pdf", "c.pdf"):
+        (tmp_path / name).chmod(0o444)  # Like a file open in a Windows program: opening for writing fails
+    with pytest.raises(ci.FolderError, match=r"Can't replace a\.pdf, c\.pdf in .*Are they open"):
+        ci.check_not_locked(files)
+
+
+@pytest.mark.parametrize("names, message", [
+    (["a.pdf", "b.PDF", "c.jpg"], "Removed 2 PDFs and 1 JPEG from an earlier run"),
+    (["a.jpg", "b.jpeg"], "Removed 2 JPEGs from an earlier run"),
+    (["a.pdf"], "Removed 1 PDF from an earlier run"),
+])
+def test_remove_old_outputs_logs_counts(tmp_path, caplog, names, message):
+    touch(tmp_path, *names, "keep.pdf")
+    with caplog.at_level("INFO", logger=ci.logger.name):
+        ci.remove_old_outputs([tmp_path / name for name in names])
+    assert [p.name for p in tmp_path.iterdir()] == ["keep.pdf"]
+    assert caplog.messages == [f"  {message}"]
+
+
+def test_remove_old_outputs_logs_nothing_without_files(caplog):
+    with caplog.at_level("INFO", logger=ci.logger.name):
+        ci.remove_old_outputs([])
+    assert caplog.messages == []
